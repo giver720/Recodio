@@ -119,7 +119,13 @@ class RecodioDownloadService : Service() {
     }
 
     private val downloadDir: File
-        get() = File(getExternalFilesDir(null), "Recodio")
+        get() {
+            // The Service can outlive the Activity that set DownloadState.downloadDirPath (or
+            // even start fresh after process death), so fall back to the persisted prefs value
+            // directly rather than trusting only the in-memory singleton.
+            val chosen = DownloadState.downloadDirPath ?: DownloadDirPrefs.load(applicationContext)
+            return chosen?.let { File(it) } ?: File(getExternalFilesDir(null), "Recodio")
+        }
 
     // Mirrors YtDlpDownloader.AnalyzeAsync on desktop: --flat-playlist -J, then hand-parsed
     // JSON (the library's VideoInfo mapper doesn't expose a playlist's "entries" array).

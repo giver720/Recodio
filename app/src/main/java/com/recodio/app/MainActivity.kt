@@ -3,8 +3,11 @@ package com.recodio.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -46,6 +49,34 @@ class MainActivity : ComponentActivity() {
     private val notifPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
 
+    private val folderPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
+            if (uri == null) return@registerForActivityResult
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            val path = DownloadDirPrefs.uriToPath(uri)
+            if (path == null) {
+                DownloadState.status = "Esa carpeta no esta en el almacenamiento principal, elegi otra."
+                return@registerForActivityResult
+            }
+            DownloadState.downloadDirPath = path
+            DownloadDirPrefs.save(this, path)
+        }
+
+    fun pickDownloadFolder() {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+            DownloadState.status = "Habilita \"Permitir acceso a todos los archivos\" para Recodio y volve a intentar."
+            return
+        }
+        folderPickerLauncher.launch(null)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -54,6 +85,8 @@ class MainActivity : ComponentActivity() {
         ) {
             notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+
+        DownloadState.downloadDirPath = DownloadDirPrefs.load(this)
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -74,7 +107,7 @@ private fun startService(activity: ComponentActivity, action: String, url: Strin
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecodioScreen() {
-    val activity = androidx.compose.ui.platform.LocalContext.current as ComponentActivity
+    val activity = androidx.compose.ui.platform.LocalContext.current as MainActivity
     val s = DownloadState
     val scroll = rememberScrollState()
 
@@ -148,6 +181,24 @@ fun RecodioScreen() {
                     items(s.queue) { item -> Text("• ${item.label}", style = MaterialTheme.typography.bodySmall) }
                 }
                 TextButton(onClick = { s.queue.clear() }) { Text("Vaciar cola") }
+            }
+
+            Text("Carpeta de descarga:", style = MaterialTheme.typography.bodySmall)
+            Text(
+                s.downloadDirPath ?: "Predeterminada (privada de la app)",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { activity.pickDownloadFolder() }, enabled = !s.running) { Text("Elegir carpeta") }
+                if (s.downloadDirPath != null) {
+                    TextButton(
+                        onClick = {
+                            s.downloadDirPath = null
+                            DownloadDirPrefs.save(activity, null)
+                        },
+                        enabled = !s.running
+                    ) { Text("Restablecer") }
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -33,6 +33,10 @@ object DownloadState {
     var organizeInFolders by mutableStateOf(true)
     var sponsorBlock by mutableStateOf(false)
 
+    // null = usar la carpeta privada por defecto de la app (Android/data/.../Recodio).
+    // Non-null = ruta absoluta elegida por el usuario, ya traducida desde la SAF tree URI.
+    var downloadDirPath by mutableStateOf<String?>(null)
+
     val queue = mutableStateListOf<QueueItem>()
 
     var analyzing by mutableStateOf(false)
