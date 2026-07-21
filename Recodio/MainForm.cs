@@ -81,6 +81,10 @@ public class MainForm : Form
         Log($"App iniciada (PID {Environment.ProcessId})");
         UpdateStatus();
 
+        // Keep yt-dlp/spotDL fresh: YouTube breaks old versions constantly. Background,
+        // throttled to once a day, never blocks startup.
+        _ = UpdateToolsAsync(auto: true);
+
         _trayIcon.BalloonTipTitle = "Recodio";
         _trayIcon.BalloonTipText = "Listo. La conversion es manual: usa \"Convertir pendientes ahora\" o \"Convertir a formato...\".";
         _trayIcon.ShowBalloonTip(2500);
@@ -136,6 +140,7 @@ public class MainForm : Form
         flow.Controls.Add(MakeButton("Abrir carpeta", (_, _) => OpenWatchFolder()));
         flow.Controls.Add(MakeButton("Ver log", (_, _) => OpenLogFile()));
         flow.Controls.Add(MakeButton("Convertir pendientes ahora", async (_, _) => await SweepAsync()));
+        flow.Controls.Add(MakeButton("Actualizar descargadores", async (_, _) => await UpdateToolsAsync(auto: false)));
         Controls.Add(flow);
 
         _chkStartup = new CheckBox
@@ -411,6 +416,62 @@ public class MainForm : Form
 
         var trayText = text.Length > 0 ? "Recodio - " + text : "Recodio";
         _trayIcon.Text = trayText.Length > 63 ? trayText[..60] + "..." : trayText;
+    }
+
+    private bool _updatingTools;
+
+    // Updates yt-dlp (self-update) and spotDL (pip) in the background. auto=true is the
+    // daily startup check; auto=false is the manual button and always runs.
+    private async Task UpdateToolsAsync(bool auto)
+    {
+        if (_updatingTools) return;
+        if (auto)
+        {
+            if (DateTime.TryParse(_config.LastToolsUpdateCheck, out var last)
+                && (DateTime.Now - last) < TimeSpan.FromHours(24))
+                return;
+        }
+        else if (_downloadForm is { IsDisposed: false } || _spotDlForm is { IsDisposed: false })
+        {
+            // Updating an exe/package while a download might be using it fails with a file
+            // lock; for the manual button just ask the user to close those windows first.
+            MessageBox.Show(this, "Cerra las ventanas de descarga antes de actualizar los descargadores.", "Recodio");
+            return;
+        }
+
+        _updatingTools = true;
+        try
+        {
+            Log("Buscando actualizaciones de yt-dlp y spotDL...");
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+
+            try
+            {
+                var yt = await ToolUpdater.UpdateYtDlpAsync(_ytDlpPath, line => Log($"  yt-dlp: {line}"), cts.Token);
+                Log(yt.Summary);
+            }
+            catch (Exception ex)
+            {
+                Log($"No se pudo actualizar yt-dlp: {ex.Message}");
+            }
+
+            try
+            {
+                var sp = await ToolUpdater.UpdateSpotDlAsync(_spotdlPath, line => Log($"  spotDL: {line}"), cts.Token);
+                Log(sp.Summary);
+            }
+            catch (Exception ex)
+            {
+                Log($"No se pudo actualizar spotDL: {ex.Message}");
+            }
+
+            _config.LastToolsUpdateCheck = DateTime.Now.ToString("o");
+            try { SaveConfig(); } catch { /* transient OneDrive lock; retried next save */ }
+        }
+        finally
+        {
+            _updatingTools = false;
+        }
     }
 
     private async Task SweepAsync()

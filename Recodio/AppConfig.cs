@@ -21,6 +21,9 @@ public class AppConfig
     public bool SpotDlOrganizeInFolders { get; set; } = true; // subfolder per playlist/album; loose songs stay loose
     public bool SpotDlSponsorBlock { get; set; } = false; // cut non-music segments (intros/outros/sponsors) via SponsorBlock
 
+    // ISO timestamp of the last automatic yt-dlp/spotDL update check (throttles it to daily).
+    public string LastToolsUpdateCheck { get; set; } = "";
+
     public static string QualityLabel(string quality) => quality switch
     {
         "medium" => "Media (192 kbps)",
