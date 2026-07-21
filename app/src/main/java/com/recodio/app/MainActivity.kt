@@ -49,6 +49,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,8 +59,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    // Not tied to lifecycleScope on purpose - a startup update check that gets cancelled by a
+    // quick screen rotation or activity recreation would just silently never run some days.
+    private val updateCheckScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val notifPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
@@ -102,6 +111,7 @@ class MainActivity : ComponentActivity() {
         }
 
         DownloadState.downloadDirPath = DownloadDirPrefs.load(this)
+        updateCheckScope.launch { AppUpdateChecker.checkIfDue(this@MainActivity) }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -124,7 +134,9 @@ private fun startService(activity: ComponentActivity, action: String, url: Strin
 fun RecodioScreen() {
     val activity = androidx.compose.ui.platform.LocalContext.current as MainActivity
     val s = DownloadState
+    val u = UpdateState
     val scroll = rememberScrollState()
+    val updateScope = rememberCoroutineScope()
 
     Scaffold(topBar = { TopAppBar(title = { Text("Recodio") }) }) { padding ->
         Column(
@@ -135,6 +147,34 @@ fun RecodioScreen() {
                 .verticalScroll(scroll),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            if (u.availableVersion != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Version ${u.availableVersion} disponible", style = MaterialTheme.typography.bodySmall)
+                        Button(
+                            onClick = { AppUpdateChecker.startDownload(activity, u.downloadUrl!!, u.availableVersion!!) },
+                            enabled = !u.downloading
+                        ) { Text(if (u.downloading) "Descargando..." else "Actualizar") }
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = { updateScope.launch { AppUpdateChecker.checkNow(activity, silent = false) } },
+                        enabled = !u.checking && !u.downloading
+                    ) { Text(if (u.checking) "Buscando..." else "Buscar actualizaciones") }
+                    if (u.status.isNotBlank()) Text(u.status, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
             OutlinedTextField(
                 value = s.url,
                 onValueChange = { s.url = it },
