@@ -192,6 +192,8 @@ class RecodioDownloadService : Service() {
         DownloadState.running = true
         DownloadState.progress = 0f
         DownloadState.log = ""
+        DownloadState.downloadItems.clear()
+        items.forEach { DownloadState.downloadItems.add(DownloadItemUi(it.label)) }
         DownloadState.appendLog(">> Carpeta de destino: ${downloadDir.absolutePath}")
 
         var totalOk = 0
@@ -208,10 +210,12 @@ class RecodioDownloadService : Service() {
                 if (i > 0) Thread.sleep(2_000)
 
                 DownloadState.status = if (items.size > 1) "Cola ${i + 1} de ${items.size}: ${item.label}" else "Descargando..."
+                DownloadState.downloadItems[i].status = ItemStatus.DOWNLOADING
                 DownloadState.appendLog(">> ${item.label}")
                 updateNotif(item.label, 0)
 
-                val failCount = downloadWithRetry(item)
+                val failCount = downloadWithRetry(item, i)
+                DownloadState.downloadItems[i].status = if (failCount == 0) ItemStatus.DONE else ItemStatus.ERROR
                 totalFail += failCount
                 if (failCount == 0) totalOk++
             }
@@ -226,9 +230,11 @@ class RecodioDownloadService : Service() {
         } catch (e: CanceledException) {
             DownloadState.status = "Descarga cancelada."
             DownloadState.appendLog(">> Descarga cancelada.")
+            DownloadState.downloadItems.firstOrNull { it.status == ItemStatus.DOWNLOADING }?.status = ItemStatus.ERROR
         } catch (e: Exception) {
             DownloadState.status = "Error al descargar."
             DownloadState.appendLog(">> ERROR: ${e.message}")
+            DownloadState.downloadItems.firstOrNull { it.status == ItemStatus.DOWNLOADING }?.status = ItemStatus.ERROR
         } finally {
             DownloadState.running = false
         }
@@ -242,10 +248,10 @@ class RecodioDownloadService : Service() {
     // aborted run - execute() just throws YoutubeDLException directly (confirmed by testing: a
     // real HTTP 403 came back as a thrown exception, never as a populated response object), so
     // that's the actual signal to retry on, not an exit-code check.
-    private fun downloadWithRetry(item: QueueItem): Int {
+    private fun downloadWithRetry(item: QueueItem, index: Int): Int {
         for (attempt in 1..(MAX_ABORT_RETRIES + 1)) {
             try {
-                return downloadOnce(item)
+                return downloadOnce(item, index)
             } catch (e: CanceledException) {
                 throw e
             } catch (e: Exception) {
@@ -258,7 +264,7 @@ class RecodioDownloadService : Service() {
         return 0
     }
 
-    private fun downloadOnce(item: QueueItem): Int {
+    private fun downloadOnce(item: QueueItem, index: Int): Int {
         // item.isPlaylist is known ahead of time from our own analysis, so the template only
         // ever references %(playlist_title)s when it's guaranteed to actually be set - no need
         // for --output-na-placeholder at all. (That flag's empty-string value tripped a bug in
@@ -312,6 +318,7 @@ class RecodioDownloadService : Service() {
         YoutubeDL.getInstance().execute(request, processId) { pct, _, line ->
             if (pct >= 0) {
                 DownloadState.progress = pct / 100f
+                DownloadState.downloadItems[index].progress = pct / 100f
                 updateNotif(item.label, pct.toInt())
             }
             if (line.isNotBlank()) {

@@ -11,16 +11,23 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -31,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -38,9 +46,15 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -225,16 +239,72 @@ fun RecodioScreen() {
                 }
             }
 
-            LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
             Text(s.status, style = MaterialTheme.typography.bodyMedium)
 
-            LaunchedEffect(s.log) { scroll.scrollTo(scroll.maxValue) }
-            Text(
-                s.log.ifEmpty { "(sin actividad todavia)" },
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                modifier = Modifier.fillMaxWidth()
-            )
+            if (s.downloadItems.isNotEmpty()) {
+                Text("Descargas:", style = MaterialTheme.typography.bodySmall)
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    s.downloadItems.forEach { item -> DownloadItemRow(item) }
+                }
+            }
+
+            var showLog by remember { mutableStateOf(false) }
+            TextButton(onClick = { showLog = !showLog }) { Text(if (showLog) "Ocultar log" else "Ver log") }
+            if (showLog) {
+                LaunchedEffect(s.log) { scroll.scrollTo(scroll.maxValue) }
+                Text(
+                    s.log.ifEmpty { "(sin actividad todavia)" },
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadItemRow(item: DownloadItemUi) {
+    val (dotColor, statusText) = when (item.status) {
+        ItemStatus.QUEUED -> MaterialTheme.colorScheme.outline to "En cola"
+        ItemStatus.DOWNLOADING -> MaterialTheme.colorScheme.primary to "${(item.progress * 100).toInt()}%"
+        ItemStatus.DONE -> Color(0xFF4CAF50) to "Listo"
+        ItemStatus.ERROR -> MaterialTheme.colorScheme.error to "Error"
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(dotColor)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    item.label,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(statusText, style = MaterialTheme.typography.labelSmall, color = dotColor)
+            }
+            if (item.status == ItemStatus.DOWNLOADING) {
+                LinearProgressIndicator(
+                    progress = { item.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                        .height(3.dp)
+                )
+            }
         }
     }
 }

@@ -21,6 +21,17 @@ data class QueueItem(
 )
 data class PlaylistEntry(val index: Int, val title: String, var selected: Boolean = true)
 
+enum class ItemStatus { QUEUED, DOWNLOADING, DONE, ERROR }
+
+// Per-item visual state for the download list. A plain data class wouldn't do - Compose only
+// recomposes readers when the STATE OBJECT they read changes, and a `var` on a data class
+// sitting inside a mutableStateListOf is invisible to snapshot tracking unless the field
+// itself is a mutableStateOf. This way item.status = X recomposes just that row.
+class DownloadItemUi(val label: String) {
+    var status by mutableStateOf(ItemStatus.QUEUED)
+    var progress by mutableStateOf(0f)
+}
+
 // Single source of truth shared between the Compose UI and the foreground Service. Compose
 // snapshot state (mutableStateOf/mutableStateListOf) is safe to read/write from any thread in
 // the same process, so the Service can drive this directly while the Activity observes it -
@@ -38,6 +49,10 @@ object DownloadState {
     var downloadDirPath by mutableStateOf<String?>(null)
 
     val queue = mutableStateListOf<QueueItem>()
+
+    // Built fresh at the start of each runQueue() run - one entry per item actually being
+    // downloaded, in order, so the UI can show live per-item progress instead of a text log.
+    val downloadItems = mutableStateListOf<DownloadItemUi>()
 
     var analyzing by mutableStateOf(false)
     var analyzedUrl by mutableStateOf("")
