@@ -25,8 +25,16 @@ public static class ProcessRunner
 
     // Starts psi with redirected stdout/stderr, streams each non-blank line to onLine as it
     // arrives, waits for exit (killing on cancellation), and throws if the exit code is nonzero.
+    //
+    // throwOnPositiveExit controls only the POSITIVE-exit-code case. A negative exit code always
+    // throws - that's the abrupt-kill/bot-detection signal both downloaders retry on. A positive
+    // exit code from yt-dlp, though, just means "--ignore-errors kept going but at least one item
+    // in the batch failed" - the run still finished, so a caller tracking its own per-item
+    // failCount (from ERROR: lines) can pass false here to get that count back instead of an
+    // exception, and show an honest "N ok, M con error" summary rather than a hard failure.
     public static async Task RunAsync(
-        ProcessStartInfo psi, Action<string> onLine, Func<int, string> nonZeroExitMessage, CancellationToken ct)
+        ProcessStartInfo psi, Action<string> onLine, Func<int, string> nonZeroExitMessage, CancellationToken ct,
+        bool throwOnPositiveExit = true)
     {
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
@@ -65,6 +73,10 @@ public static class ProcessRunner
         await WaitForExitAsync(proc, ct);
 
         if (proc.ExitCode != 0)
-            throw new InvalidOperationException(nonZeroExitMessage(proc.ExitCode));
+        {
+            var message = nonZeroExitMessage(proc.ExitCode);
+            if (proc.ExitCode < 0 || throwOnPositiveExit)
+                throw new InvalidOperationException(message);
+        }
     }
 }

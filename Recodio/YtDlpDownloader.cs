@@ -206,7 +206,7 @@ public static class YtDlpDownloader
                 ? " Suele pasar cuando YouTube corta la conexion por demasiada descarga en rafaga; ya se reintento automaticamente. Los videos ya bajados quedaron guardados: podes volver a correr la misma URL y se saltean los que ya tenes."
                 : "";
             return $"yt-dlp termino con codigo {exitCode}.{hint}";
-        }, ct);
+        }, ct, throwOnPositiveExit: false);
 
         return failCount;
     }
