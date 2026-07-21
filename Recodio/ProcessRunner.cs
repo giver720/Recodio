@@ -1,0 +1,70 @@
+using System.ComponentModel;
+using System.Diagnostics;
+
+namespace Recodio;
+
+// Shared plumbing for running a CLI tool (yt-dlp, spotDL) as a child process: stream
+// stdout/stderr line-by-line, kill the process (and its children) if cancelled, and surface
+// a nonzero exit code as an exception. Kept out of the individual downloader wrappers so the
+// cancellation-kill semantics can't drift between them.
+public static class ProcessRunner
+{
+    public static async Task WaitForExitAsync(Process proc, CancellationToken ct)
+    {
+        await using (ct.Register(() =>
+        {
+            try { if (!proc.HasExited) proc.Kill(true); } catch { /* already exited */ }
+        }).ConfigureAwait(false))
+        {
+            await proc.WaitForExitAsync(ct);
+        }
+
+        if (ct.IsCancellationRequested)
+            throw new OperationCanceledException(ct);
+    }
+
+    // Starts psi with redirected stdout/stderr, streams each non-blank line to onLine as it
+    // arrives, waits for exit (killing on cancellation), and throws if the exit code is nonzero.
+    public static async Task RunAsync(
+        ProcessStartInfo psi, Action<string> onLine, Func<int, string> nonZeroExitMessage, CancellationToken ct)
+    {
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+
+        using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+
+        void HandleLine(string? data)
+        {
+            if (data == null) return;
+            var trimmed = data.TrimEnd();
+            if (trimmed.Length > 0) onLine(trimmed);
+        }
+
+        proc.OutputDataReceived += (_, e) => HandleLine(e.Data);
+        proc.ErrorDataReceived += (_, e) => HandleLine(e.Data);
+
+        try
+        {
+            proc.Start();
+        }
+        catch (Win32Exception ex)
+        {
+            // The bare "no se puede encontrar el archivo especificado" Win32Exception is
+            // meaningless to a user - name the tool and point at the fix instead.
+            var toolName = Path.GetFileNameWithoutExtension(psi.FileName);
+            throw new InvalidOperationException(
+                $"No se encontro \"{toolName}\" ({psi.FileName}). Instalalo o revisa que este en el PATH del sistema.",
+                ex);
+        }
+
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+
+        await WaitForExitAsync(proc, ct);
+
+        if (proc.ExitCode != 0)
+            throw new InvalidOperationException(nonZeroExitMessage(proc.ExitCode));
+    }
+}
