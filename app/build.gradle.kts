@@ -12,8 +12,8 @@ android {
         applicationId = "com.recodio.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "1.0.1"
 
         // youtubedl-android ships a native CPython per ABI. x86_64 kept on purpose so the
         // APK also runs in desktop emulators (LDPlayer) for testing.

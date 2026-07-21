@@ -76,13 +76,15 @@ private fun startService(activity: ComponentActivity, action: String, url: Strin
 fun RecodioScreen() {
     val activity = androidx.compose.ui.platform.LocalContext.current as ComponentActivity
     val s = DownloadState
+    val scroll = rememberScrollState()
 
     Scaffold(topBar = { TopAppBar(title = { Text("Recodio") }) }) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(16.dp)
+                .verticalScroll(scroll),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             OutlinedTextField(
@@ -175,16 +177,12 @@ fun RecodioScreen() {
             LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
             Text(s.status, style = MaterialTheme.typography.bodyMedium)
 
-            val scroll = rememberScrollState()
             LaunchedEffect(s.log) { scroll.scrollTo(scroll.maxValue) }
             Text(
                 s.log.ifEmpty { "(sin actividad todavia)" },
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f, fill = false)
-                    .verticalScroll(scroll)
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }
