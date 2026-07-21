@@ -116,7 +116,13 @@ class RecodioDownloadService : Service() {
         YoutubeDL.getInstance().init(applicationContext)
         FFmpeg.getInstance().init(applicationContext)
         initialized = true
+        YtDlpUpdater.updateIfDue(applicationContext) { DownloadState.appendLog(it) }
     }
+
+    // Playlist detection without a prior analysis pass - a plain URL-shape check, not a network
+    // call, so it's cheap to run on every download.
+    private fun looksLikePlaylistUrl(url: String): Boolean =
+        url.contains("list=", ignoreCase = true) || url.contains("/playlist", ignoreCase = true)
 
     private val downloadDir: File
         get() {
@@ -180,7 +186,12 @@ class RecodioDownloadService : Service() {
             // Only trust the analyzed entries if they're for THIS url - otherwise the field
             // was edited after analyzing and they'd be stale.
             val matchesAnalysis = DownloadState.analyzedUrl == url
-            val isPlaylist = matchesAnalysis && DownloadState.analyzedEntries.size > 1
+            // If the user never hit "Analizar" (or edited the URL after), fall back to a plain
+            // URL-shape check - without this, a playlist link downloaded without prior analysis
+            // silently skipped both the subfolder template AND the --sleep-requests/
+            // --sleep-interval throttling below, which is exactly the kind of unthrottled batch
+            // request pattern that gets an IP rate-limited.
+            val isPlaylist = if (matchesAnalysis) DownloadState.analyzedEntries.size > 1 else looksLikePlaylistUrl(url)
             val label = if (matchesAnalysis) DownloadState.analyzedPlaylistTitle ?: url else url
             val selected = if (isPlaylist) {
                 DownloadState.analyzedEntries.filter { it.selected }.map { it.index }
@@ -304,6 +315,11 @@ class RecodioDownloadService : Service() {
                 addOption("--sleep-requests", "0.75")
                 addOption("--sleep-interval", "1")
                 addOption("--max-sleep-interval", "3")
+                // Without this, yt-dlp resolves metadata for EVERY entry up front before the
+                // first byte downloads - on a 20+ video playlist that's a long stretch where the
+                // UI shows 0% with nothing visibly happening. This starts downloading each entry
+                // as soon as its own metadata is ready instead.
+                addOption("--lazy-playlist")
             }
             if (DownloadState.sponsorBlock) {
                 addOption("--sponsorblock-remove", "sponsor,selfpromo,interaction")
