@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -251,12 +252,25 @@ fun RecodioScreen() {
             var showLog by remember { mutableStateOf(false) }
             TextButton(onClick = { showLog = !showLog }) { Text(if (showLog) "Ocultar log" else "Ver log") }
             if (showLog) {
-                LaunchedEffect(s.log) { scroll.scrollTo(scroll.maxValue) }
+                // The system back gesture/button should close the log instead of doing nothing -
+                // without this the only way out is finding the small toggle button again, which
+                // feels "stuck" since swiping back (the instinctive Android gesture) does nothing.
+                BackHandler { showLog = false }
+
+                // Its own bounded scroll state, separate from the page's - otherwise every new
+                // log line (which arrives continuously while downloading) auto-scrolls the WHOLE
+                // page to the bottom, dragging the user past the "Ocultar log" button and making
+                // it feel impossible to get back out.
+                val logScroll = rememberScrollState()
+                LaunchedEffect(s.log) { logScroll.scrollTo(logScroll.maxValue) }
                 Text(
                     s.log.ifEmpty { "(sin actividad todavia)" },
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(220.dp)
+                        .verticalScroll(logScroll)
                 )
             }
         }
