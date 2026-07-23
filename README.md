@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.10**
+**Versión actual: 1.3.11**
 
 ## Requisitos
 
@@ -90,6 +90,9 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.11
+- yt-dlp: si borrás la carpeta de una descarga, el **archive se limpia** y el progreso arranca en 0 (re-descarga real)
 
 ### 1.3.10
 - yt-dlp: **sin thumbnails** — no descarga, escribe ni embebe `.jpg`/imágenes de portada

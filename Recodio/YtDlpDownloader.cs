@@ -376,6 +376,12 @@ public static class YtDlpDownloader
         else if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && CookieManager.BrowserCookiesBroken)
             onLine(">> Cookies del navegador desactivadas esta sesion (error DPAPI previo). Continuando sin cookies.");
 
+        // Disk is source of truth: if the user deleted the playlist folder (or files),
+        // drop those ids from the archive so progress starts at 0 and yt-dlp re-downloads.
+        var pruned = PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        if (pruned > 0)
+            onLine($">> Se reiniciaron {pruned} item(s) del archive (ya no estan en carpeta).");
+
         // Folder scan: skip anything already on disk (even if archive was wiped).
         // Always on — never re-download a video that already exists in the playlist folder.
         var skippedOnDisk = SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
@@ -383,10 +389,10 @@ public static class YtDlpDownloader
         if (skippedOnDisk > 0)
         {
             onLine($">> Omitidas {skippedOnDisk} ya presentes en carpeta (no se re-descargan).");
-            // Mark pre-skipped items for the queue UI (by id key).
+            // Mark only items that still have files on disk.
             foreach (var e in entries)
             {
-                if (IsArchived(e, archivePath))
+                if (IsArchived(e, archivePath) && EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder))
                     Report(status: "Omitido (ya en carpeta)", itemKey: ItemKey(e), itemState: QueueItemState.Skipped,
                         currentTitle: e.Title);
             }
@@ -689,6 +695,95 @@ public static class YtDlpDownloader
     }
 
     /// <summary>
+    /// Removes archive lines for the current selection when the media files are gone
+    /// (e.g. user deleted the playlist folder to re-download). Returns how many lines dropped.
+    /// </summary>
+    private static int PruneStaleArchiveEntries(
+        List<PlaylistEntry> entries, string destDir, string? fixedPlaylistFolder,
+        string archivePath, Action<string>? onLine)
+    {
+        if (!File.Exists(archivePath) || entries.Count == 0) return 0;
+
+        var roots = new List<string?> { destDir };
+        if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
+            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
+        var index = ExistingMediaIndex.Build(roots.ToArray());
+
+        // Ids belonging to this run that no longer have a file on disk.
+        var staleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in entries)
+        {
+            if (EntryOnDisk(e, index)) continue;
+            foreach (var key in EntryArchiveKeys(e))
+                staleIds.Add(key);
+        }
+        if (staleIds.Count == 0) return 0;
+
+        string[] lines;
+        try { lines = File.ReadAllLines(archivePath); }
+        catch { return 0; }
+
+        var kept = new List<string>(lines.Length);
+        var removed = 0;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
+            {
+                kept.Add(line);
+                continue;
+            }
+            var m = ArchiveIdRegex.Match(line.Trim());
+            if (m.Success && staleIds.Contains(m.Groups[1].Value))
+            {
+                removed++;
+                continue;
+            }
+            kept.Add(line);
+        }
+
+        if (removed == 0) return 0;
+        try
+        {
+            File.WriteAllLines(archivePath, kept);
+            onLine?.Invoke($">> Archive: se quitaron {removed} id(s) sin archivo en disco.");
+        }
+        catch { return 0; }
+        return removed;
+    }
+
+    private static bool EntryOnDisk(PlaylistEntry e, ExistingMediaIndex index)
+    {
+        var id = e.Id ?? "";
+        var bare = id.StartsWith("url:", StringComparison.Ordinal) ? ""
+            : id.StartsWith("idx:", StringComparison.Ordinal) ? ""
+            : id;
+        return (!string.IsNullOrEmpty(bare) && index.HasId(bare))
+            || index.HasTitle(e.Title);
+    }
+
+    private static bool EntryHasFileOnDisk(PlaylistEntry e, string destDir, string? fixedPlaylistFolder)
+    {
+        var roots = new List<string?> { destDir };
+        if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
+            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
+        return EntryOnDisk(e, ExistingMediaIndex.Build(roots.ToArray()));
+    }
+
+    private static IEnumerable<string> EntryArchiveKeys(PlaylistEntry e)
+    {
+        var id = e.Id ?? "";
+        if (string.IsNullOrWhiteSpace(id)) yield break;
+        yield return id;
+        if (!id.StartsWith("url:", StringComparison.Ordinal)
+            && !id.StartsWith("idx:", StringComparison.Ordinal)
+            && !id.Contains(':'))
+        {
+            yield return id; // bare youtube id as stored by yt-dlp
+        }
+        // Also bare after "extractor " form is handled by ArchiveIdRegex capture group.
+    }
+
+    /// <summary>
     /// Marks playlist entries as done in the yt-dlp archive when a matching file already
     /// exists under dest (or the playlist subfolder). Returns how many were newly skipped.
     /// </summary>
@@ -713,8 +808,7 @@ public static class YtDlpDownloader
                 : id.StartsWith("idx:", StringComparison.Ordinal) ? ""
                 : id;
 
-            var onDisk = (!string.IsNullOrEmpty(bare) && index.HasId(bare))
-                || index.HasTitle(e.Title);
+            var onDisk = EntryOnDisk(e, index);
 
             if (!onDisk) continue;
 
