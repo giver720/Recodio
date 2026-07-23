@@ -12,6 +12,7 @@ public class SettingsForm : Form
     private readonly ComboBox _cmbWatchFormat;
     private readonly ComboBox _cmbOnExists;
     private readonly CheckBox _chkClipboard;
+    private readonly ComboBox _cmbCookies;
 
     public string WatchDir => _txtWatch.Text.Trim();
     public string OutputDir => _chkSameFolder.Checked ? "" : _txtOut.Text.Trim();
@@ -36,6 +37,7 @@ public class SettingsForm : Form
         _ => "skip",
     };
     public bool ClipboardAutoFill => _chkClipboard.Checked;
+    public string CookiesBrowser => BrowserCookies.KeyAt(_cmbCookies.SelectedIndex);
 
     public SettingsForm(AppConfig config, IReadOnlyList<ToolStatus>? tools = null)
     {
@@ -184,6 +186,36 @@ public class SettingsForm : Form
         };
         Controls.Add(_chkClipboard);
         y += 28;
+
+        var lblCookies = new Label
+        {
+            Text = "Cookies del navegador (automatico en yt-dlp y spotDL):",
+            Location = new Point(10, y),
+            AutoSize = true,
+        };
+        Controls.Add(lblCookies);
+        y += 18;
+        _cmbCookies = new ComboBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(280, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        _cmbCookies.Items.AddRange(BrowserCookies.Labels());
+        _cmbCookies.SelectedIndex = BrowserCookies.IndexOfKey(config.EffectiveCookiesBrowser());
+        Controls.Add(_cmbCookies);
+        y += 22;
+        var lblCookiesHint = new Label
+        {
+            Text = BrowserCookies.IsBraveInstalled()
+                ? "Brave detectado. Si yt-dlp no puede leer cookies, cierra Brave y reintenta."
+                : "Recomendado: Brave o Chrome logueado en YouTube / sitios con age-gate.",
+            Location = new Point(10, y),
+            Size = new Size(460, 32),
+            ForeColor = SystemColors.GrayText,
+        };
+        Controls.Add(lblCookiesHint);
+        y += 36;
 
         var chkContextMenu = new CheckBox
         {

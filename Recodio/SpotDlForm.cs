@@ -298,22 +298,21 @@ public class SpotDlForm : Form
 
         grp.Controls.Add(new Label
         {
-            Text = "Cookies navegador (anti bot-check):",
+            Text = "Cookies (auto desde Configuracion):",
             Location = new Point(10, 176),
             AutoSize = true,
         });
         _cmbCookies = new ComboBox
         {
             Location = new Point(10, 194),
-            Size = new Size(180, 22),
+            Size = new Size(200, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
-        _cmbCookies.Items.AddRange(["No usar", "Chrome", "Edge", "Firefox", "Brave", "Opera", "Chromium"]);
-        _cmbCookies.SelectedIndex = (config.SpotDlCookiesBrowser ?? "").ToLowerInvariant() switch
-        {
-            "chrome" => 1, "edge" => 2, "firefox" => 3, "brave" => 4, "opera" => 5, "chromium" => 6, _ => 0,
-        };
+        _cmbCookies.Items.AddRange(BrowserCookies.Labels());
+        _cmbCookies.SelectedIndex = BrowserCookies.IndexOfKey(config.EffectiveCookiesBrowser());
+        _cmbCookies.SelectedIndexChanged += (_, _) => PersistSettings();
         grp.Controls.Add(_cmbCookies);
+        _tip.SetToolTip(_cmbCookies, BrowserCookies.HintFor(config.EffectiveCookiesBrowser()));
 
         // Create dest box early so archive-reset handler can read it safely.
         _txtDest = new TextBox
@@ -466,10 +465,7 @@ public class SpotDlForm : Form
         return list;
     }
 
-    private string SelectedCookies() => _cmbCookies.SelectedIndex switch
-    {
-        1 => "chrome", 2 => "edge", 3 => "firefox", 4 => "brave", 5 => "opera", 6 => "chromium", _ => "",
-    };
+    private string SelectedCookies() => BrowserCookies.KeyAt(_cmbCookies.SelectedIndex);
 
     private void PersistSettings()
     {
@@ -482,7 +478,9 @@ public class SpotDlForm : Form
         _config.SpotDlOrganizeInFolders = _chkOrganizeFolders.Checked;
         _config.SpotDlSponsorBlock = _chkSponsorBlock.Checked;
         _config.SpotDlAudioProviders = string.Join(",", SelectedProviders());
-        _config.SpotDlCookiesBrowser = SelectedCookies();
+        var cookies = SelectedCookies();
+        _config.CookiesBrowser = cookies;
+        _config.SpotDlCookiesBrowser = cookies;
         _onSettingsChanged();
         _saveConfig();
     }

@@ -6,6 +6,7 @@ public class DownloadForm : Form
     private readonly string _ffmpegPath;
     private readonly Action<string> _onDestDirChanged;
     private readonly Action<HistoryEntry>? _onHistory;
+    private readonly Action<string>? _onCookiesChanged;
 
     private readonly TextBox _txtUrl;
     private readonly Button _btnAnalyze;
@@ -38,12 +39,15 @@ public class DownloadForm : Form
         string initialDestDir,
         Action<string> onDestDirChanged,
         Action<HistoryEntry>? onHistory = null,
-        bool clipboardAutoFill = true)
+        bool clipboardAutoFill = true,
+        string cookiesBrowser = "",
+        Action<string>? onCookiesChanged = null)
     {
         _ytDlpPath = ytDlpPath;
         _ffmpegPath = ffmpegPath;
         _onDestDirChanged = onDestDirChanged;
         _onHistory = onHistory;
+        _onCookiesChanged = onCookiesChanged;
 
         Text = "Descargar con yt-dlp (cualquier sitio)";
         Size = new Size(660, 720);
@@ -125,25 +129,28 @@ public class DownloadForm : Form
         _cmbAudioQuality.SelectedIndex = 0;
         Controls.Add(_cmbAudioQuality);
 
-        var lblCookies = new Label { Text = "Cookies del navegador (login / age-gate / Instagram / X):", Location = new Point(10, 312), AutoSize = true };
+        var lblCookies = new Label
+        {
+            Text = "Cookies (automatico; se guarda en Configuracion):",
+            Location = new Point(10, 312),
+            AutoSize = true,
+        };
         Controls.Add(lblCookies);
         _cmbCookies = new ComboBox
         {
             Location = new Point(10, 330),
-            Size = new Size(240, 22),
+            Size = new Size(280, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
-        _cmbCookies.Items.AddRange([
-            "No usar (publico)",
-            "Chrome",
-            "Edge",
-            "Firefox",
-            "Brave",
-            "Opera",
-            "Chromium",
-        ]);
-        _cmbCookies.SelectedIndex = 0;
+        _cmbCookies.Items.AddRange(BrowserCookies.Labels());
+        _cmbCookies.SelectedIndex = BrowserCookies.IndexOfKey(cookiesBrowser);
+        _cmbCookies.SelectedIndexChanged += (_, _) =>
+        {
+            _onCookiesChanged?.Invoke(SelectedCookiesBrowser());
+        };
         Controls.Add(_cmbCookies);
+        var tipCookies = new ToolTip();
+        tipCookies.SetToolTip(_cmbCookies, BrowserCookies.HintFor(cookiesBrowser));
 
         _chkOrganizeFolders = new CheckBox
         {
@@ -263,16 +270,7 @@ public class DownloadForm : Form
         _ => "mp4",
     };
 
-    private string SelectedCookiesBrowser() => _cmbCookies.SelectedIndex switch
-    {
-        1 => "chrome",
-        2 => "edge",
-        3 => "firefox",
-        4 => "brave",
-        5 => "opera",
-        6 => "chromium",
-        _ => "",
-    };
+    private string SelectedCookiesBrowser() => BrowserCookies.KeyAt(_cmbCookies.SelectedIndex);
 
     private async Task AnalyzeAsync()
     {
@@ -333,7 +331,7 @@ public class DownloadForm : Form
                 || site.Contains("facebook", StringComparison.OrdinalIgnoreCase)
                 || site.Contains("tiktok", StringComparison.OrdinalIgnoreCase);
             if (_cmbCookies.SelectedIndex == 0 && mayNeedCookies)
-                _lblInfo.Text += "  Tip: si falla, prueba cookies de Chrome/Edge.";
+                _lblInfo.Text += "  Tip: activa cookies (Brave/Chrome) en el combo o en Configuracion.";
         }
         catch (OperationCanceledException)
         {

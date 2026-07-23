@@ -46,6 +46,7 @@ public class MainForm : Form
         _spotdlPath = SpotDlDownloader.ResolveSpotDlPath();
 
         LoadConfig();
+        EnsureCookiesDefault();
         LoadHistory();
         try { Directory.CreateDirectory(_config.WatchDir); } catch { /* path may be invalid until user fixes settings */ }
 
@@ -342,7 +343,14 @@ public class MainForm : Form
         {
             _config.DownloadDir = dir;
             SaveConfig();
-        }, RecordHistory, _config.ClipboardAutoFill);
+        }, RecordHistory, _config.ClipboardAutoFill,
+            cookiesBrowser: _config.EffectiveCookiesBrowser(),
+            onCookiesChanged: key =>
+            {
+                _config.CookiesBrowser = key;
+                _config.SpotDlCookiesBrowser = key; // keep legacy field in sync
+                SaveConfig();
+            });
         _downloadForm.FormClosed += (_, _) => _downloadForm = null;
         _downloadForm.Show();
     }
@@ -382,10 +390,12 @@ public class MainForm : Form
         _config.WatchConvertFormat = form.WatchConvertFormat;
         _config.OnFileExists = form.OnFileExists;
         _config.ClipboardAutoFill = form.ClipboardAutoFill;
+        _config.CookiesBrowser = form.CookiesBrowser;
+        _config.SpotDlCookiesBrowser = form.CookiesBrowser;
 
         try { Directory.CreateDirectory(_config.WatchDir); } catch { /* user will fix path */ }
         SaveConfig();
-        Log($"Configuracion actualizada: watchDir={_config.WatchDir} mode={_config.WatchMode} format={_config.WatchConvertFormat} quality={_config.Quality} theme={_config.Theme}");
+        Log($"Configuracion actualizada: watchDir={_config.WatchDir} mode={_config.WatchMode} format={_config.WatchConvertFormat} quality={_config.Quality} theme={_config.Theme} cookies={_config.CookiesBrowser}");
 
         if (watchDirChanged || watchModeChanged)
             SetupWatcher();
@@ -561,6 +571,32 @@ public class MainForm : Form
         catch
         {
             Log("No se pudo leer config.json, usando valores por defecto");
+        }
+    }
+
+    // First run / empty preference: prefer Brave when its profile exists so YouTube/X
+    // downloads work without the user opening the cookies combo every time.
+    private void EnsureCookiesDefault()
+    {
+        var before = _config.CookiesBrowser;
+        // Migrate legacy spotDL-only field.
+        if (string.IsNullOrWhiteSpace(_config.CookiesBrowser)
+            && !string.IsNullOrWhiteSpace(_config.SpotDlCookiesBrowser))
+        {
+            _config.CookiesBrowser = _config.SpotDlCookiesBrowser.Trim().ToLowerInvariant();
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.CookiesBrowser) && BrowserCookies.IsBraveInstalled())
+        {
+            _config.CookiesBrowser = "brave";
+            _config.SpotDlCookiesBrowser = "brave";
+            try { SaveConfig(); } catch { /* ignore */ }
+            Log("Cookies automaticas: Brave detectado — se usara en yt-dlp y spotDL.");
+        }
+        else if (!string.IsNullOrWhiteSpace(_config.CookiesBrowser)
+                 && !string.Equals(before, _config.CookiesBrowser, StringComparison.OrdinalIgnoreCase))
+        {
+            try { SaveConfig(); } catch { /* ignore */ }
         }
     }
 

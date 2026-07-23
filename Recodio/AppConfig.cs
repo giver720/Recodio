@@ -21,6 +21,11 @@ public class AppConfig
 
     public bool ClipboardAutoFill { get; set; } = true;
 
+    // Global cookies browser for yt-dlp AND spotDL (--cookies-from-browser KEY).
+    // "" = off. Default empty; LoadConfig / first run resolves Brave if installed.
+    // chrome | edge | firefox | brave | opera | chromium | ""
+    public string CookiesBrowser { get; set; } = "";
+
     // spotDL is a separate download pipeline (Spotify metadata + YouTube Music audio)
     // from the yt-dlp video downloader above, so it keeps its own independent settings.
     public string SpotDlDownloadDir { get; set; } = Path.Combine(
@@ -36,11 +41,21 @@ public class AppConfig
     // Comma-separated: youtube-music,youtube,soundcloud,bandcamp,piped
     public string SpotDlAudioProviders { get; set; } = "youtube-music,youtube,soundcloud";
 
-    // chrome | edge | firefox | brave | opera | chromium | "" (none)
+    // Legacy (pre-1.3.2): migrated into CookiesBrowser on load if CookiesBrowser is empty.
     public string SpotDlCookiesBrowser { get; set; } = "";
 
     // ISO timestamp of the last automatic yt-dlp/spotDL update check (throttles it to daily).
     public string LastToolsUpdateCheck { get; set; } = "";
+
+    /// <summary>Effective cookies key after legacy migration + Brave auto-default.</summary>
+    public string EffectiveCookiesBrowser()
+    {
+        if (!string.IsNullOrWhiteSpace(CookiesBrowser))
+            return CookiesBrowser.Trim().ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(SpotDlCookiesBrowser))
+            return SpotDlCookiesBrowser.Trim().ToLowerInvariant();
+        return BrowserCookies.ResolveDefault("");
+    }
 
     public static string QualityLabel(string quality) => quality switch
     {
