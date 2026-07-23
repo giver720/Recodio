@@ -992,10 +992,15 @@ public static class YtDlpDownloader
         // Remux/merge requires ffmpeg; if merge fails yt-dlp may leave separate streams.
         CookieManager.ApplyToArgs(args, cookies);
 
-        if (embedExtras)
-            args.AddRange(["--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg"]);
-        else
-            args.Add("--embed-metadata");
+        // Metadata only — never download/write/embed thumbnails (no .jpg/.webp sidecar files).
+        // embedExtras previously also pulled --embed-thumbnail + --convert-thumbnails jpg; that is banned.
+        _ = embedExtras;
+        args.Add("--embed-metadata");
+        args.AddRange([
+            "--no-write-thumbnail",
+            "--no-write-all-thumbnails",
+            "--no-embed-thumbnail",
+        ]);
 
         if (isPlaylist)
         {
