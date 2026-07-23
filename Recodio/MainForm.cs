@@ -347,6 +347,12 @@ public class MainForm : Form
             return;
         }
 
+        var retryPolicy = new YtDlpDownloader.RetryPolicy(
+            _config.YtDlpBatchPasses,
+            _config.YtDlpPerItemAttempts,
+            _config.YtDlpAbortRetries,
+            _config.YtDlpCliRetries);
+
         _downloadForm = new DownloadForm(_ytDlpPath, _ffmpegPath, _config.DownloadDir, dir =>
         {
             _config.DownloadDir = dir;
@@ -357,6 +363,15 @@ public class MainForm : Form
             {
                 _config.CookiesBrowser = key;
                 _config.SpotDlCookiesBrowser = key; // keep legacy field in sync
+                SaveConfig();
+            },
+            initialRetries: retryPolicy,
+            onRetriesChanged: p =>
+            {
+                _config.YtDlpBatchPasses = p.BatchPasses;
+                _config.YtDlpPerItemAttempts = p.PerItemAttempts;
+                _config.YtDlpAbortRetries = p.AbortRetries;
+                _config.YtDlpCliRetries = p.CliRetries;
                 SaveConfig();
             });
         _downloadForm.FormClosed += (_, _) => _downloadForm = null;
@@ -609,7 +624,12 @@ public class MainForm : Form
                 _downloadForm.ApplyExternalSettings(
                     _config.DownloadDir,
                     _config.EffectiveCookiesBrowser(),
-                    _config.ClipboardAutoFill);
+                    _config.ClipboardAutoFill,
+                    new YtDlpDownloader.RetryPolicy(
+                        _config.YtDlpBatchPasses,
+                        _config.YtDlpPerItemAttempts,
+                        _config.YtDlpAbortRetries,
+                        _config.YtDlpCliRetries));
 
             if (_spotDlForm is { IsDisposed: false })
                 _spotDlForm.ApplyExternalSettings(_config);

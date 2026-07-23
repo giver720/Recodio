@@ -24,11 +24,19 @@ public class DownloadForm : Form
     private readonly ComboBox _cmbCookies;
     private readonly CheckBox _chkOrganizeFolders;
     private readonly CheckBox _chkRemoveSponsors;
+    private readonly ComboBox _cmbRetryPreset;
+    private readonly NumericUpDown _numBatchPasses;
+    private readonly NumericUpDown _numPerItem;
+    private readonly NumericUpDown _numAbort;
+    private readonly NumericUpDown _numCliRetries;
     private readonly TextBox _txtDest;
     private readonly DownloadProgressPanel _progress;
     private readonly Button _btnDownload;
     private readonly Button _btnCancel;
     private readonly Button _btnClose;
+    private readonly Action<YtDlpDownloader.RetryPolicy>? _onRetriesChanged;
+    private readonly ToolTip _tip = new();
+    private bool _loadingRetryUi;
 
     private List<PlaylistEntry> _entries = [];
     private string _detectedExtractor = "";
@@ -47,18 +55,21 @@ public class DownloadForm : Form
         Action<HistoryEntry>? onHistory = null,
         bool clipboardAutoFill = true,
         string cookiesBrowser = "",
-        Action<string>? onCookiesChanged = null)
+        Action<string>? onCookiesChanged = null,
+        YtDlpDownloader.RetryPolicy? initialRetries = null,
+        Action<YtDlpDownloader.RetryPolicy>? onRetriesChanged = null)
     {
         _ytDlpPath = ytDlpPath;
         _ffmpegPath = ffmpegPath;
         _onDestDirChanged = onDestDirChanged;
         _onHistory = onHistory;
         _onCookiesChanged = onCookiesChanged;
+        _onRetriesChanged = onRetriesChanged;
 
         Text = "Descargar con yt-dlp (cualquier sitio)";
-        Size = new Size(680, 720);
+        Size = new Size(680, 760);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(600, 640);
+        MinimumSize = new Size(600, 680);
 
         var lblUrl = new Label
         {
@@ -176,11 +187,62 @@ public class DownloadForm : Form
         };
         Controls.Add(_chkRemoveSponsors);
 
-        var lblDest = new Label { Text = "Carpeta de destino:", Location = new Point(10, 394), AutoSize = true };
+        // --- Retry policy (user controlled) ---
+        Controls.Add(new Label
+        {
+            Text = "Reintentos:",
+            Location = new Point(10, 394),
+            AutoSize = true,
+        });
+        _cmbRetryPreset = new ComboBox
+        {
+            Location = new Point(80, 391),
+            Size = new Size(120, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        _cmbRetryPreset.Items.AddRange(["Rapido", "Equilibrado", "Persistente", "Personalizado"]);
+        Controls.Add(_cmbRetryPreset);
+        _tip.SetToolTip(_cmbRetryPreset,
+            "Rapido = pocos reintentos (termina antes).\n" +
+            "Equilibrado = valor por defecto.\n" +
+            "Persistente = mas reintentos (playlists dificiles).\n" +
+            "Personalizado = ajusta los numeros a mano.");
+
+        Controls.Add(new Label { Text = "Pasadas lista:", Location = new Point(210, 394), AutoSize = true });
+        _numBatchPasses = MakeRetryNum(300, 391, 1, 4, 2);
+        _tip.SetToolTip(_numBatchPasses, "Cuantas veces re-correr la playlist completa (1–4).");
+
+        Controls.Add(new Label { Text = "Por item:", Location = new Point(360, 394), AutoSize = true });
+        _numPerItem = MakeRetryNum(420, 391, 1, 5, 2);
+        _tip.SetToolTip(_numPerItem, "Intentos uno por uno si fallo en la lista (1–5).");
+
+        Controls.Add(new Label { Text = "Conexion:", Location = new Point(480, 394), AutoSize = true });
+        _numAbort = MakeRetryNum(540, 391, 0, 3, 1);
+        _tip.SetToolTip(_numAbort, "Reintentos si se corta la conexion mid-download (0–3).");
+
+        Controls.Add(new Label { Text = "yt-dlp --retries:", Location = new Point(10, 422), AutoSize = true });
+        _numCliRetries = MakeRetryNum(115, 419, 1, 15, 5);
+        _tip.SetToolTip(_numCliRetries, "Reintentos internos de yt-dlp por fragmento/red (1–15).");
+
+        var initial = (initialRetries ?? YtDlpDownloader.RetryPolicy.Balanced).Clamped();
+        ApplyRetryPolicyToUi(initial);
+        _cmbRetryPreset.SelectedIndexChanged += (_, _) => OnRetryPresetChanged();
+        EventHandler retryChanged = (_, _) =>
+        {
+            if (_loadingRetryUi) return;
+            SyncRetryPresetFromNumbers();
+            PersistRetries();
+        };
+        _numBatchPasses.ValueChanged += retryChanged;
+        _numPerItem.ValueChanged += retryChanged;
+        _numAbort.ValueChanged += retryChanged;
+        _numCliRetries.ValueChanged += retryChanged;
+
+        var lblDest = new Label { Text = "Carpeta de destino:", Location = new Point(10, 450), AutoSize = true };
         Controls.Add(lblDest);
-        _txtDest = new TextBox { Text = initialDestDir, Location = new Point(10, 412), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _txtDest = new TextBox { Text = initialDestDir, Location = new Point(10, 468), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         Controls.Add(_txtDest);
-        var btnDest = new Button { Text = "...", Location = new Point(560, 411), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var btnDest = new Button { Text = "...", Location = new Point(560, 467), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         btnDest.Click += (_, _) =>
         {
             using var fbd = new FolderBrowserDialog { InitialDirectory = _txtDest.Text.Trim() };
@@ -196,13 +258,13 @@ public class DownloadForm : Form
             if (typed.Length > 0) _onDestDirChanged(typed);
         };
 
-        _progress = new DownloadProgressPanel(10, 446, 640, this);
+        _progress = new DownloadProgressPanel(10, 500, 640, this);
 
-        _btnDownload = new Button { Text = "Descargar", Location = new Point(385, 665), Size = new Size(90, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnDownload = new Button { Text = "Descargar", Location = new Point(385, 720), Size = new Size(90, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         _btnDownload.Click += async (_, _) => await StartDownloadAsync();
         Controls.Add(_btnDownload);
 
-        _btnCancel = new Button { Text = "Cancelar", Location = new Point(480, 665), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
+        _btnCancel = new Button { Text = "Cancelar", Location = new Point(480, 720), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
         _btnCancel.Click += (_, _) =>
         {
             _cts?.Cancel();
@@ -210,7 +272,7 @@ public class DownloadForm : Form
         };
         Controls.Add(_btnCancel);
 
-        _btnClose = new Button { Text = "Cerrar", Location = new Point(565, 665), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnClose = new Button { Text = "Cerrar", Location = new Point(565, 720), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         _btnClose.Click += (_, _) => Close();
         Controls.Add(_btnClose);
 
@@ -264,11 +326,86 @@ public class DownloadForm : Form
 
     public bool IsBusy => _cts != null || _analyzeCts != null;
 
+    private NumericUpDown MakeRetryNum(int x, int y, int min, int max, int value)
+    {
+        var n = new NumericUpDown
+        {
+            Location = new Point(x, y),
+            Size = new Size(48, 22),
+            Minimum = min,
+            Maximum = max,
+            Value = Math.Clamp(value, min, max),
+        };
+        Controls.Add(n);
+        return n;
+    }
+
+    public YtDlpDownloader.RetryPolicy CurrentRetryPolicy() => new YtDlpDownloader.RetryPolicy(
+        (int)_numBatchPasses.Value,
+        (int)_numPerItem.Value,
+        (int)_numAbort.Value,
+        (int)_numCliRetries.Value).Clamped();
+
+    private void ApplyRetryPolicyToUi(YtDlpDownloader.RetryPolicy p)
+    {
+        _loadingRetryUi = true;
+        try
+        {
+            p = p.Clamped();
+            _numBatchPasses.Value = p.BatchPasses;
+            _numPerItem.Value = p.PerItemAttempts;
+            _numAbort.Value = p.AbortRetries;
+            _numCliRetries.Value = p.CliRetries;
+            SyncRetryPresetFromNumbers();
+        }
+        finally { _loadingRetryUi = false; }
+    }
+
+    private void OnRetryPresetChanged()
+    {
+        if (_loadingRetryUi) return;
+        var p = _cmbRetryPreset.SelectedIndex switch
+        {
+            0 => YtDlpDownloader.RetryPolicy.Fast,
+            1 => YtDlpDownloader.RetryPolicy.Balanced,
+            2 => YtDlpDownloader.RetryPolicy.Persistent,
+            _ => CurrentRetryPolicy(),
+        };
+        if (_cmbRetryPreset.SelectedIndex is 0 or 1 or 2)
+            ApplyRetryPolicyToUi(p);
+        PersistRetries();
+    }
+
+    private void SyncRetryPresetFromNumbers()
+    {
+        var cur = CurrentRetryPolicy();
+        _loadingRetryUi = true;
+        try
+        {
+            if (cur.Equals(YtDlpDownloader.RetryPolicy.Fast.Clamped()))
+                _cmbRetryPreset.SelectedIndex = 0;
+            else if (cur.Equals(YtDlpDownloader.RetryPolicy.Balanced.Clamped()))
+                _cmbRetryPreset.SelectedIndex = 1;
+            else if (cur.Equals(YtDlpDownloader.RetryPolicy.Persistent.Clamped()))
+                _cmbRetryPreset.SelectedIndex = 2;
+            else
+                _cmbRetryPreset.SelectedIndex = 3;
+        }
+        finally { _loadingRetryUi = false; }
+    }
+
+    private void PersistRetries() => _onRetriesChanged?.Invoke(CurrentRetryPolicy());
+
     /// <summary>Apply settings changed from the main Config dialog while this form stays open.</summary>
-    public void ApplyExternalSettings(string destDir, string cookiesBrowser, bool clipboardAutoFill)
+    public void ApplyExternalSettings(string destDir, string cookiesBrowser, bool clipboardAutoFill,
+        YtDlpDownloader.RetryPolicy? retries = null)
     {
         if (IsDisposed) return;
-        if (InvokeRequired) { BeginInvoke(() => ApplyExternalSettings(destDir, cookiesBrowser, clipboardAutoFill)); return; }
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => ApplyExternalSettings(destDir, cookiesBrowser, clipboardAutoFill, retries));
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(destDir) && !IsBusy)
             _txtDest.Text = destDir;
         else if (!string.IsNullOrWhiteSpace(destDir) && IsBusy
@@ -278,6 +415,9 @@ public class DownloadForm : Form
         var idx = BrowserCookies.IndexOfKey(cookiesBrowser);
         if (idx >= 0 && idx < _cmbCookies.Items.Count && !IsBusy)
             _cmbCookies.SelectedIndex = idx;
+
+        if (retries is { } r && !IsBusy)
+            ApplyRetryPolicyToUi(r);
     }
 
     private void WarnIfUrlDrifted()
@@ -487,6 +627,9 @@ public class DownloadForm : Form
             if (string.IsNullOrWhiteSpace(playlistTitle) && selectedEntries.Count > 1)
                 playlistTitle = null;
 
+            PersistRetries();
+            var policy = CurrentRetryPolicy();
+
             var failCount = await YtDlpDownloader.DownloadAsync(
                 _ytDlpPath, _ffmpegPath, url, selectedEntries, format, videoQuality, audioQuality,
                 _chkOrganizeFolders.Checked, _chkRemoveSponsors.Checked, destDir,
@@ -506,7 +649,8 @@ public class DownloadForm : Form
                 },
                 _cts.Token,
                 cookiesFromBrowser: cookies,
-                playlistTitle: playlistTitle);
+                playlistTitle: playlistTitle,
+                retryPolicy: policy);
 
             var status = failCount == 0 ? "ok" : failCount >= selectedEntries.Count ? "fail" : "partial";
             var ok = selectedEntries.Count - failCount;

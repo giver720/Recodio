@@ -25,9 +25,32 @@ public static class YtDlpDownloader
 {
     private const string ArchiveFileName = ".recodio-ytdlp-archive.txt";
 
-    private const int MaxBatchPasses = 4;
-    private const int MaxPerVideoAttempts = 4;
-    private const int MaxAbortRetries = 3;
+    // Defaults when caller does not pass a policy (tests / old call sites).
+    public const int DefaultBatchPasses = 2;
+    public const int DefaultPerItemAttempts = 2;
+    public const int DefaultAbortRetries = 1;
+    public const int DefaultCliRetries = 5;
+
+    /// <summary>User-configurable retry limits for Recodio's yt-dlp wrapper.</summary>
+    public readonly record struct RetryPolicy(
+        int BatchPasses,
+        int PerItemAttempts,
+        int AbortRetries,
+        int CliRetries)
+    {
+        public static RetryPolicy Default => new(
+            DefaultBatchPasses, DefaultPerItemAttempts, DefaultAbortRetries, DefaultCliRetries);
+
+        public static RetryPolicy Fast => new(1, 1, 0, 3);
+        public static RetryPolicy Balanced => Default;
+        public static RetryPolicy Persistent => new(3, 4, 2, 10);
+
+        public RetryPolicy Clamped() => new(
+            Math.Clamp(BatchPasses, 1, 4),
+            Math.Clamp(PerItemAttempts, 1, 5),
+            Math.Clamp(AbortRetries, 0, 3),
+            Math.Clamp(CliRetries, 1, 15));
+    }
 
     public static readonly string[] OutputFormats = ["mp4", "mkv", "best", "mp3", "m4a"];
 
@@ -296,8 +319,10 @@ public static class YtDlpDownloader
         bool sponsorBlock, string destDir,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, CancellationToken ct,
         string cookiesFromBrowser = "",
-        string? playlistTitle = null)
+        string? playlistTitle = null,
+        RetryPolicy? retryPolicy = null)
     {
+        var policy = (retryPolicy ?? RetryPolicy.Default).Clamped();
         Directory.CreateDirectory(destDir);
         var entries = selectedEntries is { Count: > 0 }
             ? selectedEntries.Select(NormalizeEntry).ToList()
@@ -412,8 +437,6 @@ public static class YtDlpDownloader
 
         // Archive next to media (playlist folder when organized) so lists don't share one archive.
         archivePath = ArchivePathFor(destDir, fixedPlaylistFolder);
-        TryMigrateRootArchive(destDir, archivePath, entries, onLine);
-        InvalidateArchiveCache();
 
         var useSponsorBlock = sponsorBlock
             && (LooksLikeYoutubeUrl(url) || entries.Any(e => IsYoutubeExtractor(e.Extractor)));
@@ -434,12 +457,23 @@ public static class YtDlpDownloader
         else if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && CookieManager.BrowserCookiesBroken)
             onLine(">> Cookies del navegador desactivadas esta sesion (error DPAPI previo). Continuando sin cookies.");
 
-        // Disk is source of truth: if the user deleted the playlist folder (or files),
-        // drop those ids from the archive so progress starts at 0 and yt-dlp re-downloads.
-        var pruned = PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        // Disk is the only source of truth for "already downloaded".
+        // If the user deleted the playlist folder (or all media), strip those ids from
+        // BOTH the playlist archive and any legacy root archive so yt-dlp re-downloads.
+        // Never re-import root archive lines without a file on disk (that blocked re-downloads).
+        var pruned = 0;
+        pruned += PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        var rootArchive = Path.Combine(destDir, ArchiveFileName);
+        if (!string.Equals(Path.GetFullPath(rootArchive), Path.GetFullPath(archivePath), StringComparison.OrdinalIgnoreCase)
+            && File.Exists(rootArchive))
+        {
+            pruned += PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, rootArchive, onLine);
+        }
+        // Only migrate root → playlist archive when the media file still exists on disk.
+        TryMigrateRootArchive(destDir, archivePath, entries, fixedPlaylistFolder, onLine);
         InvalidateArchiveCache();
         if (pruned > 0)
-            onLine($">> Se reiniciaron {pruned} item(s) del archive (ya no estan en carpeta).");
+            onLine($">> Se reiniciaron {pruned} item(s) del archive (ya no estan en carpeta). Se vuelven a bajar.");
 
         // Folder scan: skip anything already on disk (even if archive was wiped).
         // Always on — never re-download a video that already exists in the playlist folder.
@@ -463,34 +497,39 @@ public static class YtDlpDownloader
         }
         Report(status: "Iniciando...");
 
+        onLine($">> Reintentos: {policy.BatchPasses} pasada(s) de lista, {policy.PerItemAttempts} por item, "
+            + $"{policy.AbortRetries} conexion, yt-dlp --retries {policy.CliRetries}.");
+
         // ----- Phase A: batch passes -----
-        for (var pass = 1; pass <= MaxBatchPasses; pass++)
+        for (var pass = 1; pass <= policy.BatchPasses; pass++)
         {
             ct.ThrowIfCancellationRequested();
 
             // Re-scan folder each pass (in case files appeared between passes).
             SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+            // Drop archive-only entries that still have no file (prevents yt-dlp skip without media).
+            PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
             InvalidateArchiveCache();
 
-            var missingBefore = CountMissing(entries, archivePath, permanentFailures);
+            var missingBefore = CountMissing(entries, destDir, fixedPlaylistFolder, archivePath, permanentFailures);
             if (missingBefore == 0)
             {
-                onLine(">> Todos los items ya estan descargados (archive + carpeta).");
+                onLine(">> Todos los items ya estan descargados (archivo en carpeta).");
                 Report(filePct: 0, status: "Todos ya estaban descargados.");
                 TryWriteM3u(organizeInFolders, isMultiItem, destDir, fixedPlaylistFolder, onLine);
-                return permanentFailures.Count;
+                return 0;
             }
 
             if (pass > 1)
             {
-                var wait = Math.Min(8 + pass * 4, 30);
-                onLine($">> Reintento de lista {pass}/{MaxBatchPasses}: faltan {missingBefore}. Esperando {wait}s...");
-                Report(status: $"Reintento lista {pass}/{MaxBatchPasses}: faltan {missingBefore}", phase: "retry");
+                var wait = 5;
+                onLine($">> Reintento de lista {pass}/{policy.BatchPasses}: faltan {missingBefore}. Esperando {wait}s...");
+                Report(status: $"Reintento lista {pass}/{policy.BatchPasses}: faltan {missingBefore}", phase: "retry");
                 await Task.Delay(TimeSpan.FromSeconds(wait), ct);
             }
             else
             {
-                onLine($">> Descargando {entries.Count} item(s) (pasada 1/{MaxBatchPasses})...");
+                onLine($">> Descargando {missingBefore} item(s) pendientes (pasada 1/{policy.BatchPasses})...");
                 Report(status: $"Descargando {missingBefore} item(s)...", phase: "download");
             }
 
@@ -499,7 +538,7 @@ public static class YtDlpDownloader
             List<int>? playlistItems = null;
             if (usePlaylistItems)
             {
-                playlistItems = GetMissing(entries, archivePath, permanentFailures)
+                playlistItems = GetMissing(entries, destDir, fixedPlaylistFolder, archivePath, permanentFailures)
                     .Select(e => e.Index)
                     .Where(i => i > 0)
                     .Distinct()
@@ -512,8 +551,8 @@ public static class YtDlpDownloader
                 }
             }
 
-            var relaxed = pass >= 3;
-            var embedExtras = pass < 3;
+            var relaxed = pass >= Math.Max(2, policy.BatchPasses);
+            var embedExtras = pass < policy.BatchPasses;
             var isPlaylistPace = usePlaylistItems && (playlistItems?.Count ?? 0) > 1;
 
             Action<DownloadProgressUpdate> batchProgress = u =>
@@ -550,7 +589,7 @@ public static class YtDlpDownloader
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                     relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                    onLine, batchProgress, permanentFailures, ct, selectionIds);
+                    onLine, batchProgress, permanentFailures, ct, selectionIds, policy);
                 // If cookie args got disabled mid-run, keep local copy in sync for next pass.
                 cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
             }
@@ -567,7 +606,7 @@ public static class YtDlpDownloader
                             ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                             organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, batchProgress, permanentFailures, ct, selectionIds);
+                            onLine, batchProgress, permanentFailures, ct, selectionIds, policy);
                     }
                     catch (InvalidOperationException ex2)
                     {
@@ -600,22 +639,29 @@ public static class YtDlpDownloader
                 }
             }
 
-            var missingAfter = CountMissing(entries, archivePath, permanentFailures);
-            onLine($">> Pasada {pass} lista: {entries.Count - missingAfter - permanentFailures.Count}/{entries.Count} ok"
+            PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+            InvalidateArchiveCache();
+            var missingAfter = CountMissing(entries, destDir, fixedPlaylistFolder, archivePath, permanentFailures);
+            var okCount = entries.Count - missingAfter - permanentFailures.Count;
+            if (okCount < 0) okCount = entries.Count(e => EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder));
+            onLine($">> Pasada {pass} lista: {okCount}/{entries.Count} ok"
                 + (permanentFailures.Count > 0 ? $", {permanentFailures.Count} no disponibles" : "")
                 + (missingAfter > 0 ? $", {missingAfter} pendientes" : "")
                 + ".");
             Report(status: $"Pasada {pass} lista · faltan {missingAfter}");
 
             if (missingAfter == 0) break;
-            if (pass >= 2 && missingAfter >= missingBefore) break;
+            // No progress this pass → stop batch loop (avoid re-walking the whole list again).
+            if (missingAfter >= missingBefore) break;
         }
 
-        // ----- Phase B: one-by-one for whatever is still missing -----
-        var stillMissing = GetMissing(entries, archivePath, permanentFailures);
+        // ----- Phase B: one-by-one for whatever is still missing (limited attempts) -----
+        PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+        InvalidateArchiveCache();
+        var stillMissing = GetMissing(entries, destDir, fixedPlaylistFolder, archivePath, permanentFailures);
         if (stillMissing.Count > 0)
         {
-            onLine($">> Reintentando {stillMissing.Count} item(s) uno por uno...");
+            onLine($">> Reintentando {stillMissing.Count} item(s) uno por uno (max {policy.PerItemAttempts} intentos c/u)...");
 
             for (var i = 0; i < stillMissing.Count; i++)
             {
@@ -639,14 +685,14 @@ public static class YtDlpDownloader
                 var canPlaylistIndex = usePlaylistItems && entry.Index > 0;
 
                 var ok = false;
-                for (var attempt = 1; attempt <= MaxPerVideoAttempts && !ok; attempt++)
+                for (var attempt = 1; attempt <= policy.PerItemAttempts && !ok; attempt++)
                 {
                     ct.ThrowIfCancellationRequested();
                     if (attempt > 1)
                     {
-                        var wait = attempt * 5;
-                        onLine($">>   reintento {attempt}/{MaxPerVideoAttempts} de \"{entry.Title}\" en {wait}s...");
-                        Report(status: $"Reintento {attempt}/{MaxPerVideoAttempts}: {entry.Title}", phase: "retry");
+                        var wait = 3;
+                        onLine($">>   reintento {attempt}/{policy.PerItemAttempts} de \"{entry.Title}\" en {wait}s...");
+                        Report(status: $"Reintento {attempt}/{policy.PerItemAttempts}: {entry.Title}", phase: "retry");
                         await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                     }
                     else
@@ -704,7 +750,7 @@ public static class YtDlpDownloader
                             format, videoQuality, audioQuality,
                             attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, itemProgress, permanentFailures, ct, selectionIds);
+                            onLine, itemProgress, permanentFailures, ct, selectionIds, policy);
                     }
                     catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                     {
@@ -718,7 +764,7 @@ public static class YtDlpDownloader
                                 format, videoQuality, audioQuality,
                                 attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                                 relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                                onLine, itemProgress, permanentFailures, ct, selectionIds);
+                                onLine, itemProgress, permanentFailures, ct, selectionIds, policy);
                         }
                         catch (InvalidOperationException ex2)
                         {
@@ -731,12 +777,19 @@ public static class YtDlpDownloader
                     }
 
                     SyncSyntheticArchive([entry], ResolveScanRoot(destDir, fixedPlaylistFolder), archivePath);
-                    ok = IsArchived(entry, archivePath);
+                    SeedArchiveFromFolder([entry], destDir, fixedPlaylistFolder, archivePath, onLine: null);
+                    InvalidateArchiveCache();
+                    // Disk is the only success signal — archive alone must not mark OK
+                    // (otherwise a stale archive after folder delete skips re-download).
+                    ok = EntryHasFileOnDisk(entry, destDir, fixedPlaylistFolder);
                 }
 
                 if (!ok)
                 {
-                    onLine($">>   NO se pudo descargar: {entry.Title}");
+                    // Give up on this item — do not leave it for endless future passes.
+                    foreach (var k in EntryArchiveKeys(entry))
+                        permanentFailures.Add(k);
+                    onLine($">>   NO se pudo descargar (sin mas reintentos): {entry.Title}");
                     Report(itemKey: ItemKey(entry), itemState: QueueItemState.Failed, currentTitle: entry.Title,
                         status: $"Error: {entry.Title}", isError: true);
                 }
@@ -858,37 +911,51 @@ public static class YtDlpDownloader
     }
 
     /// <summary>
-    /// Copy selection-related lines from legacy root archive into the playlist-folder archive.
+    /// Copy selection-related lines from legacy root archive into the playlist-folder archive
+    /// ONLY when the media file still exists on disk. Never re-import ghost ids after a folder delete.
     /// </summary>
     private static void TryMigrateRootArchive(
-        string destDir, string newArchivePath, List<PlaylistEntry> entries, Action<string>? onLine)
+        string destDir, string newArchivePath, List<PlaylistEntry> entries,
+        string? fixedPlaylistFolder, Action<string>? onLine)
     {
         var rootArchive = Path.Combine(destDir, ArchiveFileName);
         if (string.Equals(Path.GetFullPath(rootArchive), Path.GetFullPath(newArchivePath), StringComparison.OrdinalIgnoreCase))
             return;
         if (!File.Exists(rootArchive)) return;
 
-        var keys = new HashSet<string>(entries.SelectMany(EntryArchiveKeys), StringComparer.OrdinalIgnoreCase);
-        if (keys.Count == 0) return;
+        var index = ExistingMediaIndex.Build(
+            !string.IsNullOrWhiteSpace(fixedPlaylistFolder)
+                ? Path.Combine(destDir, fixedPlaylistFolder)
+                : destDir);
 
         try
         {
             var existing = ReadArchiveIds(newArchivePath);
             var toCopy = new List<string>();
-            foreach (var line in File.ReadLines(rootArchive))
+            foreach (var e in entries)
             {
-                if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#')) continue;
-                var m = ArchiveIdRegex.Match(line.Trim());
-                if (!m.Success) continue;
-                var id = m.Groups[1].Value;
-                if (!keys.Contains(id) || existing.Contains(id)) continue;
-                toCopy.Add(line.Trim());
-                existing.Add(id);
+                if (!EntryOnDisk(e, index)) continue; // no file → do not migrate id
+                foreach (var key in EntryArchiveKeys(e))
+                {
+                    if (existing.Contains(key)) continue;
+                    // Find a matching line in root archive for this key
+                    foreach (var line in File.ReadLines(rootArchive))
+                    {
+                        if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#')) continue;
+                        var m = ArchiveIdRegex.Match(line.Trim());
+                        if (!m.Success) continue;
+                        if (!string.Equals(m.Groups[1].Value, key, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        toCopy.Add(line.Trim());
+                        existing.Add(key);
+                        break;
+                    }
+                }
             }
             if (toCopy.Count == 0) return;
             Directory.CreateDirectory(Path.GetDirectoryName(newArchivePath)!);
             File.AppendAllLines(newArchivePath, toCopy);
-            onLine?.Invoke($">> Archive: migrados {toCopy.Count} id(s) desde la carpeta padre.");
+            onLine?.Invoke($">> Archive: migrados {toCopy.Count} id(s) con archivo en disco desde la carpeta padre.");
         }
         catch { /* ignore */ }
     }
@@ -1119,8 +1186,10 @@ public static class YtDlpDownloader
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
         CancellationToken ct,
-        HashSet<string>? selectionIds = null)
+        HashSet<string>? selectionIds = null,
+        RetryPolicy? retryPolicy = null)
     {
+        var policy = (retryPolicy ?? RetryPolicy.Default).Clamped();
         for (var attempt = 1; ; attempt++)
         {
             var lastExitCode = 0;
@@ -1131,12 +1200,12 @@ public static class YtDlpDownloader
                     organizeInFolders, sponsorBlock, isPlaylist, destDir, archivePath,
                     relaxed, embedExtras, cookies, fixedPlaylistFolder,
                     onLine, onProgress, permanentFailures,
-                    code => lastExitCode = code, ct, selectionIds);
+                    code => lastExitCode = code, ct, selectionIds, policy);
             }
-            catch (InvalidOperationException) when (lastExitCode < 0 && attempt <= MaxAbortRetries)
+            catch (InvalidOperationException) when (lastExitCode < 0 && attempt <= policy.AbortRetries)
             {
-                var waitSecs = attempt * 12;
-                onLine($">> Conexion cortada (posible rate-limit del sitio). Reintentando en {waitSecs}s... ({attempt}/{MaxAbortRetries})");
+                var waitSecs = 8;
+                onLine($">> Conexion cortada (posible rate-limit). Reintentando en {waitSecs}s... ({attempt}/{policy.AbortRetries})");
                 onProgress(new DownloadProgressUpdate
                 {
                     Status = $"Conexion cortada; reintento en {waitSecs}s...",
@@ -1155,8 +1224,10 @@ public static class YtDlpDownloader
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
         Action<int> onExitCode, CancellationToken ct,
-        HashSet<string>? selectionIds = null)
+        HashSet<string>? selectionIds = null,
+        RetryPolicy? retryPolicy = null)
     {
+        var policy = (retryPolicy ?? RetryPolicy.Default).Clamped();
         var extraArgs = new List<string>();
         var formatSelector = BuildFormatSelector(format, videoQuality, audioQuality, extraArgs, relaxed);
 
@@ -1204,13 +1275,13 @@ public static class YtDlpDownloader
             "--no-overwrites",
             "--continue",
             "--download-archive", archivePath,
-            "--retries", "15",
-            "--fragment-retries", "15",
-            "--extractor-retries", "5",
-            "--file-access-retries", "8",
-            "--retry-sleep", "http:linear=1:5:1",
-            "--retry-sleep", "fragment:exp=1:20",
-            "--retry-sleep", "extractor:exp=1:10",
+            // CLI retries from user policy; Recodio also does limited batch/per-item passes.
+            "--retries", policy.CliRetries.ToString(),
+            "--fragment-retries", Math.Max(2, policy.CliRetries).ToString(),
+            "--extractor-retries", Math.Clamp(policy.CliRetries / 2, 1, 5).ToString(),
+            "--file-access-retries", "3",
+            "--retry-sleep", "http:linear=1:3:1",
+            "--retry-sleep", "fragment:linear=1:5:1",
             "--socket-timeout", "30",
             "--concurrent-fragments", "1",
             "--geo-bypass",
@@ -1525,17 +1596,26 @@ public static class YtDlpDownloader
         return false;
     }
 
-    private static int CountMissing(List<PlaylistEntry> entries, string archivePath, HashSet<string> permanent) =>
-        GetMissing(entries, archivePath, permanent).Count;
+    private static int CountMissing(
+        List<PlaylistEntry> entries, string destDir, string? fixedPlaylistFolder,
+        string archivePath, HashSet<string> permanent) =>
+        GetMissing(entries, destDir, fixedPlaylistFolder, archivePath, permanent).Count;
 
+    /// <summary>
+    /// Items still needing download: not permanent and no valid media file on disk.
+    /// Archive-only (ghost after folder delete) counts as missing so we re-download.
+    /// </summary>
     private static List<PlaylistEntry> GetMissing(
-        List<PlaylistEntry> entries, string archivePath, HashSet<string> permanent)
+        List<PlaylistEntry> entries, string destDir, string? fixedPlaylistFolder,
+        string archivePath, HashSet<string> permanent)
     {
         var missing = new List<PlaylistEntry>();
         foreach (var e in entries)
         {
             if (IsPermanent(e, permanent)) continue;
-            if (!IsArchived(e, archivePath)) missing.Add(e);
+            // Disk is truth — archive alone must not hide a deleted folder re-download.
+            if (EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder)) continue;
+            missing.Add(e);
         }
         return missing;
     }

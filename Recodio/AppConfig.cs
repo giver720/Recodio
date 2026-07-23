@@ -47,6 +47,13 @@ public class AppConfig
     // ISO timestamp of the last automatic yt-dlp/spotDL update check (throttles it to daily).
     public string LastToolsUpdateCheck { get; set; } = "";
 
+    // yt-dlp retry policy (Recodio wrapper). User-controlled from Download form.
+    // Defaults = "balanced" (finish reasonably without endless loops).
+    public int YtDlpBatchPasses { get; set; } = 2;      // full-list passes (1–4)
+    public int YtDlpPerItemAttempts { get; set; } = 2;  // one-by-one retries (1–5)
+    public int YtDlpAbortRetries { get; set; } = 1;     // connection-cut retries (0–3)
+    public int YtDlpCliRetries { get; set; } = 5;       // yt-dlp --retries (1–15)
+
     /// <summary>Effective cookies key after legacy migration + Brave auto-default.</summary>
     public string EffectiveCookiesBrowser()
     {

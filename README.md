@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.15**
+**Versión actual: 1.3.18**
 
 ## Requisitos
 
@@ -90,6 +90,19 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.18
+- yt-dlp: al borrar la carpeta de una playlist, el **archive se limpia** y se vuelve a descargar de verdad
+- La verdad es el **archivo en disco** (no archive fantasma del padre)
+
+### 1.3.17
+- yt-dlp: **UI de reintentos** (Rapido / Equilibrado / Persistente / Personalizado)
+- El usuario elige pasadas de lista, intentos por item, reintentos de conexion y `--retries`
+
+### 1.3.16
+- yt-dlp: **menos reintentos** (2 pasadas, 2 por item, 1 abort) y reintentos CLI más bajos
+- Si un item falla tras los intentos, se marca y **no se reintenta en bucle**
+- Éxito por archivo en disco, no solo archive
 
 ### 1.3.15
 - yt-dlp (Recodio): archive **por carpeta de playlist**; seed solo por `[id]` (título estricto)
