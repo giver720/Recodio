@@ -216,12 +216,17 @@ public class DownloadForm : Form
 
         FormClosing += (_, e) =>
         {
-            if (_cts == null && _analyzeCts == null) return;
+            if (_cts == null && _analyzeCts == null)
+            {
+                _progress.StopTimer();
+                return;
+            }
             e.Cancel = true;
             _closeRequested = true;
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
+        FormClosed += (_, _) => _progress.StopTimer();
 
         Shown += (_, _) =>
         {
@@ -471,7 +476,8 @@ public class DownloadForm : Form
             {
                 _progress.SetStats($"{ok} ok" + (failCount > 0 ? $" · {failCount} err" : "")
                     + $" · total {selectedEntries.Count}");
-                _progress.EndSession(summary, isError: failCount > 0, folderPath: historyPath);
+                _progress.EndSession(summary, isError: failCount > 0, folderPath: historyPath,
+                    markComplete: failCount < selectedEntries.Count || failCount == 0);
             });
 
             _onHistory?.Invoke(new HistoryEntry
@@ -489,11 +495,11 @@ public class DownloadForm : Form
         }
         catch (OperationCanceledException)
         {
-            Ui(() => _progress.EndSession("Descarga cancelada.", folderPath: _lastHistoryPath));
+            Ui(() => _progress.EndSession("Descarga cancelada.", folderPath: _lastHistoryPath, markComplete: false));
         }
         catch (Exception ex)
         {
-            Ui(() => _progress.EndSession(ex.Message, isError: true, folderPath: destDir));
+            Ui(() => _progress.EndSession(ex.Message, isError: true, folderPath: destDir, markComplete: false));
             _onHistory?.Invoke(new HistoryEntry
             {
                 Name = label,

@@ -12,13 +12,24 @@ public enum QueueItemState
 /// <summary>Structured progress event from yt-dlp / spotDL / convert.</summary>
 public sealed record DownloadProgressUpdate
 {
-    public int OverallPercent { get; init; }
-    public int FilePercent { get; init; }
+    /// <summary>Overall 0–100. Use null to leave the overall bar unchanged.</summary>
+    public int? OverallPercent { get; init; }
+
+    /// <summary>Current file 0–100. Use null to leave the file bar unchanged.</summary>
+    public int? FilePercent { get; init; }
+
     public int Done { get; init; }
     public int Total { get; init; }
     public int Skipped { get; init; }
     public int Failed { get; init; }
-    public int CurrentIndex { get; init; } // 1-based; 0 = none
+
+    /// <summary>1-based position within the full selection (not the batch).</summary>
+    public int CurrentIndex { get; init; }
+
+    /// <summary>Optional yt-dlp/spotDL batch counters (pending subset).</summary>
+    public int BatchIndex { get; init; }
+    public int BatchTotal { get; init; }
+
     public string? CurrentTitle { get; init; }
     public string Phase { get; init; } = "";
     public double? SpeedBytesPerSec { get; init; }
@@ -26,6 +37,9 @@ public sealed record DownloadProgressUpdate
     public string? SizeInfo { get; init; }
     public string? Status { get; init; }
     public bool IsError { get; init; }
+
+    /// <summary>When true, clear speed/ETA/size detail (e.g. session end).</summary>
+    public bool ClearDetail { get; init; }
 
     /// <summary>Optional key matching a row in the progress queue list.</summary>
     public string? ItemKey { get; init; }
@@ -38,7 +52,7 @@ public sealed record DownloadProgressUpdate
     {
         total = Math.Max(total, 1);
         done = Math.Clamp(done, 0, total);
-        var overall = (int)Math.Round((done + filePercent / 100.0) * 100.0 / total);
+        var overall = (int)Math.Round((done + skipped + filePercent / 100.0) * 100.0 / total);
         return new DownloadProgressUpdate
         {
             OverallPercent = Math.Clamp(overall, 0, 100),

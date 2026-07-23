@@ -403,12 +403,17 @@ public class SpotDlForm : Form
 
         FormClosing += (_, e) =>
         {
-            if (_cts == null && _analyzeCts == null) return;
+            if (_cts == null && _analyzeCts == null)
+            {
+                _progress.StopTimer();
+                return;
+            }
             e.Cancel = true;
             _closeRequested = true;
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
+        FormClosed += (_, _) => _progress.StopTimer();
 
         Shown += (_, _) =>
         {
@@ -607,6 +612,13 @@ public class SpotDlForm : Form
             status: "Iniciando descarga...");
         _progress.StartSession(destDir);
 
+        // Multi-URL: show all jobs in checklist; single job: show tracks.
+        if (_jobCount > 1)
+        {
+            _progress.SetQueueItems(jobs.Select((j, idx) =>
+                new ProgressQueueItem($"job:{idx}", j.Label)));
+        }
+
         _cts = new CancellationTokenSource();
         var totalOk = 0;
         var totalFail = 0;
@@ -618,20 +630,27 @@ public class SpotDlForm : Form
                 _jobIndex = i;
                 _jobLabel = job.Label;
 
-                // Queue checklist for this job
-                if (job.Meta is { Count: > 0 })
+                // Single-job checklist = tracks; multi-job keeps URL list and marks current.
+                if (_jobCount == 1)
                 {
-                    _progress.SetQueueItems(job.Meta.Select(t =>
-                        new ProgressQueueItem(t.Url, $"{t.Artist} - {t.Name}")));
-                }
-                else if (job.TrackUrls is { Count: > 0 })
-                {
-                    _progress.SetQueueItems(job.TrackUrls.Select(u =>
-                        new ProgressQueueItem(u, u)));
+                    if (job.Meta is { Count: > 0 })
+                    {
+                        _progress.SetQueueItems(job.Meta.Select(t =>
+                            new ProgressQueueItem(t.Url, $"{t.Artist} - {t.Name}")));
+                    }
+                    else if (job.TrackUrls is { Count: > 0 })
+                    {
+                        _progress.SetQueueItems(job.TrackUrls.Select(u =>
+                            new ProgressQueueItem(u, u)));
+                    }
+                    else
+                    {
+                        _progress.SetQueueItems([new ProgressQueueItem(job.Query, job.Label)]);
+                    }
                 }
                 else
                 {
-                    _progress.SetQueueItems([new ProgressQueueItem(job.Query, job.Label)]);
+                    _progress.SetItemState($"job:{i}", QueueItemState.Downloading, job.Label);
                 }
 
                 Ui(() =>
@@ -644,6 +663,9 @@ public class SpotDlForm : Form
                 });
 
                 IReadOnlyList<SpotDlTrack>? meta = job.Meta;
+                var lastDone = 0;
+                var lastSkipped = 0;
+                var lastTotal = job.TrackUrls?.Count ?? 0;
 
                 var failCount = await SpotDlDownloader.DownloadAsync(
                     _spotdlPath, _ffmpegPath, job.Query, job.TrackUrls,
@@ -654,6 +676,13 @@ public class SpotDlForm : Form
                     onLine: HandleDownloadLine,
                     onProgress: u =>
                     {
+                        // Capture on worker thread (before UI marshal) for post-job totals.
+                        if (u.Total > 0)
+                        {
+                            lastDone = u.Done;
+                            lastSkipped = u.Skipped;
+                            lastTotal = u.Total;
+                        }
                         try
                         {
                             if (IsDisposed || !IsHandleCreated) return;
@@ -665,21 +694,20 @@ public class SpotDlForm : Form
                                     // Blend multi-URL jobs into overall %
                                     if (_jobCount > 1 && u.Total > 0)
                                     {
-                                        var jobFrac = (double)u.Done / u.Total;
+                                        var finished = u.Done + u.Skipped;
+                                        var jobFrac = (double)finished / Math.Max(u.Total, 1);
                                         var overall = (int)Math.Round((_jobIndex + jobFrac) * 100.0 / _jobCount);
-                                        _progress.Apply(u with { OverallPercent = overall });
+                                        _progress.Apply(u with { OverallPercent = Math.Clamp(overall, 0, 100) });
+                                        _progress.SetStats(
+                                            $"Cola URL {_jobIndex + 1}/{_jobCount}"
+                                            + $" · {u.Done} ok"
+                                            + (u.Skipped > 0 ? $" · {u.Skipped} omit" : "")
+                                            + (u.Failed > 0 ? $" · {u.Failed} err" : "")
+                                            + $" · total job {u.Total}");
                                     }
                                     else
                                     {
                                         _progress.Apply(u);
-                                    }
-                                    if (_jobCount > 1)
-                                    {
-                                        _progress.SetStats(
-                                            $"Cola URL {_jobIndex + 1}/{_jobCount}"
-                                            + (u.Total > 0 ? $" · canciones {u.Done}/{u.Total}" : "")
-                                            + (u.Skipped > 0 ? $" · {u.Skipped} omit" : "")
-                                            + (u.Failed > 0 ? $" · {u.Failed} err" : ""));
                                     }
                                 }
                                 catch { /* dispose */ }
@@ -690,11 +718,28 @@ public class SpotDlForm : Form
                     _cts.Token,
                     knownTracksMeta: meta);
 
-                var songTotal = job.TrackUrls?.Count ?? Math.Max(uGuessTotal(failCount), 0);
-                totalFail += failCount;
-                totalOk += Math.Max(songTotal - failCount, 0);
+                // Prefer live progress totals over failCount guesses
+                var completedOk = lastTotal > 0
+                    ? Math.Max(lastDone + lastSkipped - failCount, 0)
+                    : Math.Max((job.TrackUrls?.Count ?? 0) - failCount, 0);
+                if (lastTotal <= 0 && job.TrackUrls is null)
+                    completedOk = failCount == 0 ? 1 : 0; // single URL job without track list
 
-                var status = failCount == 0 ? "ok" : songTotal > 0 && failCount < songTotal ? "partial" : "fail";
+                totalFail += failCount;
+                totalOk += completedOk;
+
+                if (_jobCount > 1)
+                {
+                    _progress.SetItemState($"job:{i}",
+                        failCount == 0 ? QueueItemState.Done
+                        : completedOk > 0 ? QueueItemState.Done
+                        : QueueItemState.Failed,
+                        job.Label);
+                }
+
+                var status = failCount == 0 ? "ok"
+                    : lastTotal > 0 && failCount < lastTotal ? "partial"
+                    : "fail";
                 _onHistory?.Invoke(new HistoryEntry
                 {
                     Name = job.Label.Length > 80 ? job.Label[..77] + "..." : job.Label,
@@ -715,7 +760,8 @@ public class SpotDlForm : Form
                 _progress.SetStats(_jobCount > 1
                     ? $"Cola: {_jobCount}/{_jobCount} URLs"
                     : $"{totalOk} ok" + (totalFail > 0 ? $" · {totalFail} err" : ""));
-                _progress.EndSession(summary, isError: totalFail > 0, folderPath: destDir);
+                _progress.EndSession(summary, isError: totalFail > 0, folderPath: destDir,
+                    markComplete: totalFail == 0 || totalOk > 0);
             });
 
             if (totalFail > 0)
@@ -730,11 +776,11 @@ public class SpotDlForm : Form
         }
         catch (OperationCanceledException)
         {
-            Ui(() => _progress.EndSession("Descarga cancelada.", folderPath: destDir));
+            Ui(() => _progress.EndSession("Descarga cancelada.", folderPath: destDir, markComplete: false));
         }
         catch (Exception ex)
         {
-            Ui(() => _progress.EndSession(ex.Message, isError: true, folderPath: destDir));
+            Ui(() => _progress.EndSession(ex.Message, isError: true, folderPath: destDir, markComplete: false));
             _onHistory?.Invoke(new HistoryEntry
             {
                 Name = jobs.Count > 0 ? (jobs[0].Label ?? "spotDL") : "spotDL",
@@ -755,8 +801,6 @@ public class SpotDlForm : Form
             CloseIfPending();
         }
     }
-
-    private static int uGuessTotal(int failCount) => Math.Max(failCount, 1);
 
     private void HandleDownloadLine(string line)
     {

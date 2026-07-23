@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.11**
+**Versión actual: 1.3.13**
 
 ## Requisitos
 
@@ -90,6 +90,14 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.13
+- Progreso: barra de archivo no baja en merge video+audio; omitidos se mantienen ⏭
+- spotDL cola multi-URL en checklist; totales ok más fiables; timer se detiene al cerrar
+
+### 1.3.12
+- Progreso: cancel/error no fuerza 100%; conserva velocidad/ETA; item de selección vs lote
+- Checklist yt-dlp con ItemKey; cache de archive; spotDL prune + totales fijos
 
 ### 1.3.11
 - yt-dlp: si borrás la carpeta de una descarga, el **archive se limpia** y el progreso arranca en 0 (re-descarga real)

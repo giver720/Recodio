@@ -28,6 +28,15 @@ public sealed class DownloadProgressPanel
     private int _overallPct;
     private int _filePct;
 
+    // Preserve last detail across status-only updates
+    private double? _lastSpeed;
+    private TimeSpan? _lastEta;
+    private string? _lastSize;
+
+    // Dual-stream (video then audio): keep high-water file % until a new item starts
+    private string? _fileSegmentKey;
+    private int _fileHighWater;
+
     public DownloadProgressPanel(int x, int y, int width, Control parent)
     {
         Host = new Panel
@@ -183,6 +192,11 @@ public sealed class DownloadProgressPanel
         _folderPath = null;
         OpenFolderLink.Visible = false;
         ElapsedLabel.Text = "";
+        _lastSpeed = null;
+        _lastEta = null;
+        _lastSize = null;
+        _fileSegmentKey = null;
+        _fileHighWater = 0;
         SetOverallPercent(0);
         SetFilePercent(0);
         StatsLabel.Text = statsText;
@@ -198,17 +212,29 @@ public sealed class DownloadProgressPanel
         _startedAt = DateTime.Now;
         _folderPath = folderPath;
         OpenFolderLink.Visible = false;
+        _lastSpeed = null;
+        _lastEta = null;
+        _lastSize = null;
+        _fileSegmentKey = null;
+        _fileHighWater = 0;
         _elapsedTimer.Start();
         RefreshElapsed();
     }
 
-    public void EndSession(string summary, bool isError = false, string? folderPath = null)
+    /// <param name="markComplete">If true, force overall bar to 100%. False on cancel/error.</param>
+    public void EndSession(string summary, bool isError = false, string? folderPath = null, bool markComplete = true)
     {
         _elapsedTimer.Stop();
         RefreshElapsed();
-        SetOverallPercent(100);
-        SetFilePercent(0);
+        if (markComplete)
+            SetOverallPercent(100);
+        SetFilePercent(0, force: true);
         FilePercentLabel.Text = "";
+        _lastSpeed = null;
+        _lastEta = null;
+        _lastSize = null;
+        _fileSegmentKey = null;
+        _fileHighWater = 0;
         DetailLabel.Text = "";
         CurrentLabel.Text = "";
         StatusLabel.Text = summary;
@@ -218,18 +244,51 @@ public sealed class DownloadProgressPanel
         OpenFolderLink.Visible = !string.IsNullOrWhiteSpace(_folderPath) && Directory.Exists(_folderPath);
     }
 
+    /// <summary>Stop the elapsed timer (call from FormClosed).</summary>
+    public void StopTimer()
+    {
+        try { _elapsedTimer.Stop(); } catch { /* dispose race */ }
+    }
+
     public void SetOverallPercent(int percent)
     {
         _overallPct = Math.Clamp(percent, 0, 100);
-        OverallBar.Value = _overallPct;
-        PercentLabel.Text = $"{_overallPct}%";
+        try
+        {
+            if (!OverallBar.IsDisposed)
+                OverallBar.Value = _overallPct;
+            if (!PercentLabel.IsDisposed)
+                PercentLabel.Text = $"{_overallPct}%";
+        }
+        catch (ObjectDisposedException) { /* closing */ }
     }
 
-    public void SetFilePercent(int percent)
+    /// <param name="force">If false, dual-stream: never lower the bar until a new segment/item.</param>
+    public void SetFilePercent(int percent, bool force = false, string? segmentKey = null)
     {
-        _filePct = Math.Clamp(percent, 0, 100);
-        FileBar.Value = _filePct;
-        FilePercentLabel.Text = _filePct > 0 && _filePct < 100 ? $"{_filePct}%" : "";
+        percent = Math.Clamp(percent, 0, 100);
+        if (!string.IsNullOrEmpty(segmentKey) && !string.Equals(segmentKey, _fileSegmentKey, StringComparison.Ordinal))
+        {
+            _fileSegmentKey = segmentKey;
+            _fileHighWater = 0;
+            force = true;
+        }
+        if (!force && percent < _fileHighWater && percent < 100)
+            percent = _fileHighWater;
+        if (percent >= _fileHighWater)
+            _fileHighWater = percent;
+        if (percent >= 100)
+            _fileHighWater = 100;
+
+        _filePct = percent;
+        try
+        {
+            if (!FileBar.IsDisposed)
+                FileBar.Value = _filePct;
+            if (!FilePercentLabel.IsDisposed)
+                FilePercentLabel.Text = _filePct > 0 && _filePct < 100 ? $"{_filePct}%" : "";
+        }
+        catch (ObjectDisposedException) { /* closing */ }
     }
 
     public void SetStats(string text) => StatsLabel.Text = text;
@@ -244,14 +303,14 @@ public sealed class DownloadProgressPanel
         StatusLabel.ForeColor = isError ? Color.Firebrick : SystemColors.GrayText;
     }
 
-    // --- Backward-compatible helpers used by older call sites ---
+    // --- Backward-compatible helpers ---
     public ProgressBar Bar => OverallBar;
 
     public void SetPercent(int percent) => SetOverallPercent(percent);
 
     public void SetQueue(string text) => SetStats(text);
 
-    public void SetDone(string message = "Completado.") => EndSession(message);
+    public void SetDone(string message = "Completado.") => EndSession(message, markComplete: true);
 
     public void SetOverallProgress(int completed, int total, int filePercent = 0)
     {
@@ -263,14 +322,40 @@ public sealed class DownloadProgressPanel
 
     public void Apply(DownloadProgressUpdate u)
     {
+        var segmentKey = u.ItemKey
+            ?? (!string.IsNullOrWhiteSpace(u.CurrentTitle) ? u.CurrentTitle : null);
+
+        // New item → reset dual-stream high-water
+        if (!string.IsNullOrEmpty(segmentKey)
+            && !string.Equals(segmentKey, _fileSegmentKey, StringComparison.Ordinal)
+            && u.ItemState == QueueItemState.Downloading)
+        {
+            _fileSegmentKey = segmentKey;
+            _fileHighWater = 0;
+        }
+
+        // --- bars ---
         if (u.Total > 0)
         {
-            var doneBase = u.Done + u.Skipped; // skipped count toward completion
-            var overall = u.OverallPercent;
-            if (overall <= 0 && u.Total > 0)
-                overall = (int)Math.Round((doneBase + u.FilePercent / 100.0) * 100.0 / u.Total);
-            SetOverallPercent(overall);
-            SetFilePercent(u.FilePercent);
+            var finished = u.Done + u.Skipped; // toward completion of selection
+            // Only recalculate when OverallPercent is null (not when explicitly 0)
+            if (u.OverallPercent is { } explicitOverall)
+            {
+                SetOverallPercent(explicitOverall);
+            }
+            else
+            {
+                var fileFrac = (u.FilePercent ?? 0) / 100.0;
+                var inProgress = finished < u.Total && u.FilePercent is > 0;
+                var computed = (int)Math.Round((finished + (inProgress ? fileFrac : 0)) * 100.0 / u.Total);
+                SetOverallPercent(computed);
+            }
+
+            if (u.FilePercent is { } fp)
+            {
+                var force = u.Phase is "merge" or "extract" || fp >= 100;
+                SetFilePercent(fp, force: force, segmentKey: segmentKey);
+            }
 
             var pending = Math.Max(0, u.Total - u.Done - u.Skipped - u.Failed);
             var parts = new List<string>();
@@ -279,25 +364,61 @@ public sealed class DownloadProgressPanel
             if (u.Failed > 0) parts.Add($"{u.Failed} err");
             if (pending > 0) parts.Add($"{pending} pend");
             if (parts.Count == 0) parts.Add($"0 / {u.Total}");
+
             var stats = string.Join(" · ", parts) + $" · total {u.Total}";
-            if (u.CurrentIndex > 0)
-                stats += $" · item {u.CurrentIndex}/{u.Total}";
+
+            // Selection position (not batch)
+            var selPos = u.CurrentIndex;
+            if (selPos <= 0 && finished < u.Total && (u.FilePercent is > 0 || !string.IsNullOrWhiteSpace(u.CurrentTitle)))
+                selPos = Math.Min(finished + 1, u.Total);
+            if (selPos > 0)
+                stats += $" · item {selPos}/{u.Total}";
+
+            // Optional batch subset (yt-dlp remaining playlist-items)
+            if (u.BatchIndex > 0 && u.BatchTotal > 0
+                && (u.BatchTotal != u.Total || u.BatchIndex != selPos))
+                stats += $" · lote {u.BatchIndex}/{u.BatchTotal}";
+
             StatsLabel.Text = stats;
         }
-        else if (u.OverallPercent > 0)
+        else
         {
-            SetOverallPercent(u.OverallPercent);
-            SetFilePercent(u.FilePercent);
+            // Partial update: file % only — do NOT treat file% as overall
+            if (u.FilePercent is { } fpOnly)
+                SetFilePercent(fpOnly, force: fpOnly >= 100, segmentKey: segmentKey);
+            if (u.OverallPercent is { } op)
+                SetOverallPercent(op);
         }
 
-        var detailParts = new List<string>();
-        var speed = DownloadProgressUpdate.FormatSpeed(u.SpeedBytesPerSec);
-        if (!string.IsNullOrEmpty(speed)) detailParts.Add(speed);
-        var eta = DownloadProgressUpdate.FormatEta(u.Eta);
-        if (!string.IsNullOrEmpty(eta)) detailParts.Add($"ETA {eta}");
-        if (!string.IsNullOrWhiteSpace(u.SizeInfo)) detailParts.Add(u.SizeInfo);
-        if (!string.IsNullOrWhiteSpace(u.Phase)) detailParts.Add(u.Phase);
-        DetailLabel.Text = string.Join(" · ", detailParts);
+        // --- detail: preserve last speed/ETA/size ---
+        if (u.ClearDetail)
+        {
+            _lastSpeed = null;
+            _lastEta = null;
+            _lastSize = null;
+            DetailLabel.Text = "";
+        }
+        else
+        {
+            if (u.SpeedBytesPerSec is > 0)
+                _lastSpeed = u.SpeedBytesPerSec;
+            if (u.Eta is { } etaVal && etaVal.TotalSeconds >= 0)
+                _lastEta = etaVal;
+            if (!string.IsNullOrWhiteSpace(u.SizeInfo))
+                _lastSize = u.SizeInfo;
+
+            var detailParts = new List<string>();
+            var speed = DownloadProgressUpdate.FormatSpeed(_lastSpeed);
+            if (!string.IsNullOrEmpty(speed)) detailParts.Add(speed);
+            var eta = DownloadProgressUpdate.FormatEta(_lastEta);
+            if (!string.IsNullOrEmpty(eta)) detailParts.Add($"ETA {eta}");
+            if (!string.IsNullOrWhiteSpace(_lastSize)) detailParts.Add(_lastSize!);
+            if (!string.IsNullOrWhiteSpace(u.Phase)
+                && u.Phase is not ("download" or ""))
+                detailParts.Add(u.Phase);
+            if (detailParts.Count > 0)
+                DetailLabel.Text = string.Join(" · ", detailParts);
+        }
 
         if (!string.IsNullOrWhiteSpace(u.CurrentTitle))
             CurrentLabel.Text = u.CurrentTitle!;
@@ -329,15 +450,44 @@ public sealed class DownloadProgressPanel
     public void SetItemState(string key, QueueItemState state, string? title = null)
     {
         if (!_keyToIndex.TryGetValue(key, out var idx) || idx < 0 || idx >= _items.Count)
-            return;
+        {
+            // Try bare id match against keys ending with same id
+            if (string.IsNullOrEmpty(key)) return;
+            idx = -1;
+            for (var i = 0; i < _items.Count; i++)
+            {
+                var k = _items[i].Key;
+                if (k.Equals(key, StringComparison.OrdinalIgnoreCase)
+                    || k.EndsWith(key, StringComparison.OrdinalIgnoreCase)
+                    || key.EndsWith(k, StringComparison.OrdinalIgnoreCase))
+                {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0) return;
+        }
         var it = _items[idx];
+        // Don't overwrite terminal states with Downloading; don't demote Done/Failed to Skipped.
+        if (state == QueueItemState.Downloading
+            && it.State is QueueItemState.Done or QueueItemState.Skipped or QueueItemState.Failed)
+            return;
+        if (state == QueueItemState.Skipped
+            && it.State is QueueItemState.Done or QueueItemState.Failed)
+            return;
+        if (state == QueueItemState.Done && it.State == QueueItemState.Skipped)
+            return; // keep pre-skipped as ⏭
         it.State = state;
-        if (!string.IsNullOrWhiteSpace(title)) it.Title = title!;
+        if (!string.IsNullOrWhiteSpace(title)
+            && !title.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
+            && title.Length < 200)
+            it.Title = title!;
         QueueList.Items[idx] = it.DisplayText;
         if (state == QueueItemState.Downloading)
         {
             try { QueueList.TopIndex = Math.Max(0, idx - 1); } catch { /* ignore */ }
-            CurrentLabel.Text = it.Title;
+            if (!string.IsNullOrWhiteSpace(it.Title))
+                CurrentLabel.Text = it.Title;
         }
     }
 

@@ -181,26 +181,74 @@ public static class SpotDlDownloader
             ? trackUrls.Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
             : null;
 
-        var totalKnown = knownTracks?.Count ?? 0;
         var preSkipped = 0;
         string? liveTitle = null;
         var permanent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string>? archiveCache = null;
+        int batchIndex = 0;
+        int batchTotal = 0;
 
-        void Report(int done, int total, string? status = null, bool isError = false,
+        int TotalKnown() => knownTracks?.Count ?? 0;
+
+        void InvalidateArchive() => archiveCache = null;
+
+        HashSet<string> Arch()
+        {
+            archiveCache ??= ReadArchive(archivePath);
+            return archiveCache;
+        }
+
+        int CountArchivedKnown()
+        {
+            if (knownTracks is null || knownTracks.Count == 0) return 0;
+            var a = Arch();
+            return knownTracks.Count(u => a.Contains(u));
+        }
+
+        /// <summary>Progress against fixed knownTracks.Count (never partial batch as total).</summary>
+        void ReportFromArchive(string? status = null, bool isError = false,
             string? itemKey = null, QueueItemState? itemState = null, string? currentTitle = null,
-            string phase = "")
+            string phase = "", int? batchDone = null, int? batchTot = null)
         {
             if (currentTitle != null) liveTitle = currentTitle;
-            var t = total > 0 ? total : Math.Max(totalKnown, 1);
-            var d = Math.Clamp(done, 0, t);
+            if (batchDone is >= 0) batchIndex = batchDone.Value;
+            if (batchTot is > 0) batchTotal = batchTot.Value;
+
+            var tk = TotalKnown();
+            int t;
+            int archived;
+            if (tk > 0)
+            {
+                t = tk;
+                archived = CountArchivedKnown();
+            }
+            else if (batchTot is > 0 && batchDone is >= 0)
+            {
+                t = batchTot.Value;
+                archived = Math.Clamp(batchDone.Value, 0, t);
+            }
+            else
+            {
+                t = 1;
+                archived = 0;
+            }
+
+            var newlyDone = Math.Max(0, archived - preSkipped);
+            var selPos = archived < t && phase is "download" or "retry"
+                ? Math.Min(archived + 1, t)
+                : archived;
+
             onProgress(new DownloadProgressUpdate
             {
-                Done = Math.Max(0, d - preSkipped),
+                Done = newlyDone,
                 Total = t,
                 Skipped = preSkipped,
                 Failed = permanent.Count,
-                OverallPercent = (int)Math.Round(100.0 * Math.Min(d + preSkipped, t) / t),
+                OverallPercent = (int)Math.Round(100.0 * archived / Math.Max(t, 1)),
                 FilePercent = 0,
+                CurrentIndex = selPos,
+                BatchIndex = batchIndex,
+                BatchTotal = batchTotal,
                 Status = status,
                 IsError = isError,
                 CurrentTitle = liveTitle,
@@ -209,6 +257,41 @@ public static class SpotDlDownloader
                 Phase = phase,
             });
         }
+
+        void Report(int done, int total, string? status = null, bool isError = false,
+            string? itemKey = null, QueueItemState? itemState = null, string? currentTitle = null,
+            string phase = "")
+        {
+            var tk = TotalKnown();
+            if (tk > 0 && total > 0 && total != tk)
+            {
+                InvalidateArchive();
+                ReportFromArchive(status, isError, itemKey, itemState, currentTitle, phase,
+                    batchDone: done, batchTot: total);
+                return;
+            }
+            InvalidateArchive();
+            if (tk > 0)
+                ReportFromArchive(status, isError, itemKey, itemState, currentTitle, phase);
+            else
+                ReportFromArchive(status, isError, itemKey, itemState, currentTitle, phase,
+                    batchDone: done, batchTot: Math.Max(total, 1));
+        }
+
+        Action<DownloadProgressUpdate> WrapProgress = u =>
+        {
+            if (!string.IsNullOrWhiteSpace(u.CurrentTitle)) liveTitle = u.CurrentTitle;
+            InvalidateArchive();
+            if (u.Done > 0 || u.Total > 0)
+            {
+                ReportFromArchive(u.Status, u.IsError, u.ItemKey, u.ItemState, u.CurrentTitle, u.Phase,
+                    batchDone: u.Total > 0 ? u.Done : null, batchTot: u.Total > 0 ? u.Total : null);
+            }
+            else
+            {
+                ReportFromArchive(u.Status, u.IsError, u.ItemKey, u.ItemState, u.CurrentTitle, u.Phase);
+            }
+        };
 
         onLine($">> Proveedores de audio: {string.Join(" → ", providers)}");
 
@@ -233,24 +316,30 @@ public static class SpotDlDownloader
         // When skipExisting is also true, we keep/update the spotDL archive accordingly.
         if (knownTracks != null && knownTracks.Count > 0)
         {
+            // If user deleted media files, drop stale archive URLs so progress starts at 0.
+            var pruned = PruneStaleSpotDlArchive(knownTracks, knownTracksMeta, destDir, archivePath, onLine);
+            InvalidateArchive();
+            if (pruned > 0)
+                onLine($">> Se reiniciaron {pruned} cancion(es) del archive (ya no estan en carpeta).");
+
             var skipped = SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine);
+            InvalidateArchive();
             preSkipped = skipped;
             if (skipped > 0)
             {
                 onLine($">> Omitidas {skipped} ya presentes en carpeta (no se re-descargan).");
+                var a = Arch();
                 foreach (var u in knownTracks)
                 {
-                    if (ArchiveContains(archivePath, u))
-                    {
-                        var title = knownTracksMeta?.FirstOrDefault(t =>
-                            string.Equals(t.Url, u, StringComparison.OrdinalIgnoreCase));
-                        var label = title != null ? $"{title.Artist} - {title.Name}" : u;
-                        Report(done: 0, total: totalKnown, status: "Omitida (ya en carpeta)",
-                            itemKey: u, itemState: QueueItemState.Skipped, currentTitle: label);
-                    }
+                    if (!a.Contains(u)) continue;
+                    var title = knownTracksMeta?.FirstOrDefault(t =>
+                        string.Equals(t.Url, u, StringComparison.OrdinalIgnoreCase));
+                    var label = title != null ? $"{title.Artist} - {title.Name}" : u;
+                    ReportFromArchive(status: "Omitida (ya en carpeta)",
+                        itemKey: u, itemState: QueueItemState.Skipped, currentTitle: label);
                 }
             }
-            Report(done: 0, total: totalKnown, status: "Iniciando...");
+            ReportFromArchive(status: "Iniciando...");
         }
 
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
@@ -315,7 +404,8 @@ public static class SpotDlDownloader
                         spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
                         attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                         archivePath, providers, cookieArgs,
-                        onLine, onProgress, permanent, ct);
+                        onLine, WrapProgress, permanent, ct);
+                    InvalidateArchive();
                 }
                 catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                 {
@@ -328,7 +418,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
                             attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, onProgress, permanent, ct);
+                            onLine, WrapProgress, permanent, ct);
+                        InvalidateArchive();
                     }
                     catch (InvalidOperationException ex2)
                     {
@@ -371,7 +462,7 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
                             attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, onProgress, permanent, ct, errorsPath);
+                            onLine, WrapProgress, permanent, ct, errorsPath);
                     }
                     catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                     {
@@ -382,7 +473,7 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
                             attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, onProgress, permanent, ct, errorsPath);
+                            onLine, WrapProgress, permanent, ct, errorsPath);
                     }
 
                     var failedUrls = ReadFailedUrls(errorsPath);
@@ -477,7 +568,8 @@ public static class SpotDlDownloader
                         spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
                         threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                         archivePath, rescueProviders, cookieArgs,
-                        onLine, onProgress, permanent, errorsPath: null, ct);
+                        onLine, WrapProgress, permanent, errorsPath: null, ct);
+                    InvalidateArchive();
 
                     ok = ArchiveContains(archivePath, url);
                 }
@@ -492,7 +584,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
                             threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                             archivePath, rescueProviders, cookieArgs,
-                            onLine, onProgress, permanent, errorsPath: null, ct);
+                            onLine, WrapProgress, permanent, errorsPath: null, ct);
+                        InvalidateArchive();
                         ok = ArchiveContains(archivePath, url);
                     }
                     catch (InvalidOperationException ex2)
@@ -656,12 +749,14 @@ public static class SpotDlDownloader
                 && int.TryParse(m.Groups[1].Value, out var done)
                 && int.TryParse(m.Groups[2].Value, out var total))
             {
+                // Batch counters only — outer WrapProgress remaps to full selection total.
                 onProgress(new DownloadProgressUpdate
                 {
                     Done = done,
                     Total = total,
-                    OverallPercent = total > 0 ? (int)Math.Round(100.0 * done / total) : 0,
-                    Status = $"Descargando canciones… {done} de {total}",
+                    BatchIndex = done,
+                    BatchTotal = total,
+                    Status = $"Lote… {done} de {total}",
                     Phase = "download",
                 });
             }
@@ -750,6 +845,67 @@ public static class SpotDlDownloader
     private static bool IsSpotifyTrackUrl(string q) =>
         q.Contains("open.spotify.com/track/", StringComparison.OrdinalIgnoreCase)
         || q.Contains("spotify.com/track/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Removes archive URLs for tracks whose files are gone (re-download from zero).
+    /// </summary>
+    private static int PruneStaleSpotDlArchive(
+        IReadOnlyList<string> trackUrls,
+        IReadOnlyList<SpotDlTrack>? meta,
+        string destDir,
+        string archivePath,
+        Action<string>? onLine)
+    {
+        if (!File.Exists(archivePath) || trackUrls.Count == 0) return 0;
+
+        var index = ExistingMediaIndex.Build(destDir);
+        var metaByUrl = meta?
+            .Where(t => !string.IsNullOrWhiteSpace(t.Url))
+            .GroupBy(t => t.Url, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var stale = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var url in trackUrls)
+        {
+            if (string.IsNullOrWhiteSpace(url)) continue;
+            var onDisk = false;
+            if (metaByUrl != null && metaByUrl.TryGetValue(url, out var t))
+                onDisk = index.HasArtistTitle(t.Artist, t.Name) || index.HasTitle(t.Name);
+            if (!onDisk)
+            {
+                var id = ExtractSpotifyTrackId(url);
+                if (!string.IsNullOrEmpty(id) && index.HasId(id))
+                    onDisk = true;
+            }
+            if (!onDisk) stale.Add(url);
+        }
+        if (stale.Count == 0) return 0;
+
+        string[] lines;
+        try { lines = File.ReadAllLines(archivePath); }
+        catch { return 0; }
+
+        var kept = new List<string>(lines.Length);
+        var removed = 0;
+        foreach (var line in lines)
+        {
+            var t = line.Trim();
+            if (t.Length > 0 && stale.Contains(t))
+            {
+                removed++;
+                continue;
+            }
+            kept.Add(line);
+        }
+        if (removed == 0) return 0;
+        try
+        {
+            File.WriteAllLines(archivePath, kept);
+            onLine?.Invoke($">> Archive spotDL: se quitaron {removed} URL(s) sin archivo.");
+        }
+        catch { return 0; }
+        return removed;
+    }
 
     /// <summary>
     /// Adds Spotify track URLs to the spotDL archive when a matching media file already

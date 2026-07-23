@@ -293,12 +293,35 @@ public static class YtDlpDownloader
 
         var totalItems = entries.Count;
         var preSkipped = 0;
+        var preSkippedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? liveTitle = null;
-        int liveIndex = 0;
+        int batchIndex = 0;
+        int batchTotal = 0;
         var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string>? archiveIdCache = null;
+
+        void InvalidateArchiveCache() => archiveIdCache = null;
+
+        HashSet<string> ArchiveIds()
+        {
+            archiveIdCache ??= ReadArchiveIds(archivePath);
+            return archiveIdCache;
+        }
+
+        bool EntryArchived(PlaylistEntry e) => IsArchivedInSet(e, ArchiveIds());
+
+        string? MapItemKey(string? itemKey)
+        {
+            if (string.IsNullOrEmpty(itemKey)) return itemKey;
+            var match = entries.FirstOrDefault(e =>
+                string.Equals(e.Id, itemKey, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(ItemKey(e), itemKey, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrEmpty(e.Id) && itemKey.Contains(e.Id, StringComparison.OrdinalIgnoreCase)));
+            return match != null ? ItemKey(match) : itemKey;
+        }
 
         void Report(
-            int filePct = 0,
+            int? filePct = null,
             string? status = null,
             bool isError = false,
             double? speed = null,
@@ -310,21 +333,34 @@ public static class YtDlpDownloader
             string? currentTitle = null)
         {
             if (currentTitle != null) liveTitle = currentTitle;
-            var archived = entries.Count(e => IsArchived(e, archivePath));
+            if (!string.IsNullOrEmpty(itemKey) && itemState is not null)
+                itemKey = MapItemKey(itemKey);
+
+            var archived = entries.Count(EntryArchived);
             var failed = permanentFailures.Count;
-            var done = Math.Max(0, archived);
+            var finished = Math.Max(0, archived);
+            var newlyDone = Math.Max(0, finished - preSkipped);
+            var fp = filePct ?? 0;
             var overall = totalItems <= 0
-                ? filePct
-                : (int)Math.Round((done + filePct / 100.0) * 100.0 / totalItems);
+                ? fp
+                : (int)Math.Round((finished + (fp > 0 && finished < totalItems ? fp / 100.0 : 0))
+                    * 100.0 / totalItems);
+            // Selection position: next unfinished slot while a file is in progress
+            var selPos = finished < totalItems && (fp > 0 || phase is "download" or "merge" or "extract")
+                ? Math.Min(finished + 1, totalItems)
+                : finished;
+
             onProgress(new DownloadProgressUpdate
             {
                 OverallPercent = Math.Clamp(overall, 0, 100),
-                FilePercent = Math.Clamp(filePct, 0, 100),
-                Done = Math.Max(0, done - preSkipped),
+                FilePercent = filePct is { } f ? Math.Clamp(f, 0, 100) : null,
+                Done = newlyDone,
                 Total = totalItems,
                 Skipped = preSkipped,
                 Failed = failed,
-                CurrentIndex = liveIndex,
+                CurrentIndex = selPos,
+                BatchIndex = batchIndex,
+                BatchTotal = batchTotal,
                 CurrentTitle = liveTitle,
                 Status = status,
                 IsError = isError,
@@ -379,22 +415,28 @@ public static class YtDlpDownloader
         // Disk is source of truth: if the user deleted the playlist folder (or files),
         // drop those ids from the archive so progress starts at 0 and yt-dlp re-downloads.
         var pruned = PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        InvalidateArchiveCache();
         if (pruned > 0)
             onLine($">> Se reiniciaron {pruned} item(s) del archive (ya no estan en carpeta).");
 
         // Folder scan: skip anything already on disk (even if archive was wiped).
         // Always on — never re-download a video that already exists in the playlist folder.
         var skippedOnDisk = SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        InvalidateArchiveCache();
         preSkipped = skippedOnDisk;
         if (skippedOnDisk > 0)
         {
             onLine($">> Omitidas {skippedOnDisk} ya presentes en carpeta (no se re-descargan).");
-            // Mark only items that still have files on disk.
+            // Mark only items that still have files on disk; remember keys so they stay ⏭.
             foreach (var e in entries)
             {
-                if (IsArchived(e, archivePath) && EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder))
-                    Report(status: "Omitido (ya en carpeta)", itemKey: ItemKey(e), itemState: QueueItemState.Skipped,
+                if (EntryArchived(e) && EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder))
+                {
+                    var key = ItemKey(e);
+                    preSkippedKeys.Add(key);
+                    Report(status: "Omitido (ya en carpeta)", itemKey: key, itemState: QueueItemState.Skipped,
                         currentTitle: e.Title);
+                }
             }
         }
         Report(status: "Iniciando...");
@@ -406,6 +448,7 @@ public static class YtDlpDownloader
 
             // Re-scan folder each pass (in case files appeared between passes).
             SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+            InvalidateArchiveCache();
 
             var missingBefore = CountMissing(entries, archivePath, permanentFailures);
             if (missingBefore == 0)
@@ -454,8 +497,18 @@ public static class YtDlpDownloader
             Action<DownloadProgressUpdate> batchProgress = u =>
             {
                 if (!string.IsNullOrWhiteSpace(u.CurrentTitle)) liveTitle = u.CurrentTitle;
-                if (u.CurrentIndex > 0) liveIndex = u.CurrentIndex;
-                // Re-emit with overall counts from archive.
+                // yt-dlp "item N of M" is the pending batch, not the full selection
+                if (u.BatchIndex > 0 && u.BatchTotal > 0)
+                {
+                    batchIndex = u.BatchIndex;
+                    batchTotal = u.BatchTotal;
+                }
+                else if (u.CurrentIndex > 0 && u.Total > 0 && u.Total != totalItems)
+                {
+                    batchIndex = u.CurrentIndex;
+                    batchTotal = u.Total;
+                }
+                InvalidateArchiveCache();
                 Report(
                     filePct: u.FilePercent,
                     status: u.Status,
@@ -508,14 +561,21 @@ public static class YtDlpDownloader
             // After a batch, mark successful downloads into archive from disk + yt-dlp archive.
             SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
             SyncSyntheticArchive(entries, ResolveScanRoot(destDir, fixedPlaylistFolder), archivePath);
+            InvalidateArchiveCache();
+            batchIndex = 0;
+            batchTotal = 0;
 
-            // Refresh item states from archive.
+            // Refresh item states from archive after each pass (keep pre-skipped as Skipped).
             foreach (var e in entries)
             {
+                var key = ItemKey(e);
                 if (IsPermanent(e, permanentFailures))
-                    Report(itemKey: ItemKey(e), itemState: QueueItemState.Failed, currentTitle: e.Title);
-                else if (IsArchived(e, archivePath))
-                    Report(itemKey: ItemKey(e), itemState: QueueItemState.Done, currentTitle: e.Title);
+                    Report(itemKey: key, itemState: QueueItemState.Failed, currentTitle: e.Title);
+                else if (EntryArchived(e))
+                {
+                    var state = preSkippedKeys.Contains(key) ? QueueItemState.Skipped : QueueItemState.Done;
+                    Report(itemKey: key, itemState: state, currentTitle: e.Title);
+                }
             }
 
             var missingAfter = CountMissing(entries, archivePath, permanentFailures);
@@ -539,8 +599,10 @@ public static class YtDlpDownloader
             {
                 ct.ThrowIfCancellationRequested();
                 var entry = stillMissing[i];
-                liveIndex = i + 1;
                 liveTitle = entry.Title;
+                batchIndex = i + 1;
+                batchTotal = stillMissing.Count;
+                InvalidateArchiveCache();
                 Report(status: $"Uno por uno {i + 1}/{stillMissing.Count}", phase: "retry",
                     itemKey: ItemKey(entry), itemState: QueueItemState.Downloading, currentTitle: entry.Title);
 
@@ -600,6 +662,7 @@ public static class YtDlpDownloader
 
                     Action<DownloadProgressUpdate> itemProgress = u =>
                     {
+                        InvalidateArchiveCache();
                         Report(
                             filePct: u.FilePercent,
                             status: u.Status ?? $"Descargando: {entry.Title}",
@@ -1133,12 +1196,16 @@ public static class YtDlpDownloader
             if (dest.Success)
             {
                 var name = Path.GetFileName(dest.Groups[1].Value.Trim().Trim('"'));
+                var bareFromName = Regex.Match(name, @"\[([A-Za-z0-9_-]{3,})\]").Groups[1].Value;
                 onProgress(new DownloadProgressUpdate
                 {
                     CurrentTitle = name,
                     Status = "Descargando archivo...",
                     Phase = "download",
+                    ItemKey = string.IsNullOrEmpty(bareFromName) ? null : bareFromName,
                     ItemState = QueueItemState.Downloading,
+                    // file-only: leave OverallPercent null so UI does not jump
+                    FilePercent = null,
                 });
             }
 
@@ -1157,7 +1224,7 @@ public static class YtDlpDownloader
                 onProgress(new DownloadProgressUpdate
                 {
                     FilePercent = (int)pctDetail,
-                    OverallPercent = (int)pctDetail,
+                    // Do NOT set OverallPercent = file% — outer Report maps selection progress
                     SpeedBytesPerSec = speed,
                     Eta = eta,
                     SizeInfo = sizeInfo,
@@ -1175,7 +1242,6 @@ public static class YtDlpDownloader
                     onProgress(new DownloadProgressUpdate
                     {
                         FilePercent = (int)pct,
-                        OverallPercent = (int)pct,
                         Status = $"Descargando… {(int)pct}%",
                         Phase = "download",
                     });
@@ -1191,9 +1257,12 @@ public static class YtDlpDownloader
                 {
                     onProgress(new DownloadProgressUpdate
                     {
+                        // Batch subset counters (pending playlist-items), not full selection
+                        BatchIndex = n,
+                        BatchTotal = m,
                         CurrentIndex = n,
                         Total = m,
-                        Status = $"Item {n} de {m}",
+                        Status = $"Lote {n} de {m}",
                         Phase = "download",
                         ItemState = QueueItemState.Downloading,
                     });
@@ -1223,7 +1292,18 @@ public static class YtDlpDownloader
             // Only track real extractor ids — never the "Downloading item N of M" number.
             var em = ExtractorIdRegex.Match(line);
             if (em.Success)
+            {
                 lastExtractorId = em.Groups[2].Value;
+                if (lastExtractorId.Length >= 3 && !IsLikelyItemCounter(lastExtractorId))
+                {
+                    onProgress(new DownloadProgressUpdate
+                    {
+                        ItemKey = lastExtractorId,
+                        ItemState = QueueItemState.Downloading,
+                        Phase = "download",
+                    });
+                }
+            }
 
             if (!ErrorLineRegex.IsMatch(line)) return;
             if (IsIgnorableError(line)) return;
@@ -1360,21 +1440,17 @@ public static class YtDlpDownloader
         return missing;
     }
 
-    private static bool IsArchived(PlaylistEntry e, string archivePath)
+    private static bool IsArchived(PlaylistEntry e, string archivePath) =>
+        IsArchivedInSet(e, ReadArchiveIds(archivePath));
+
+    private static bool IsArchivedInSet(PlaylistEntry e, HashSet<string> archived)
     {
-        var archived = ReadArchiveIds(archivePath);
-        if (!string.IsNullOrEmpty(e.Id))
-        {
-            if (archived.Contains(e.Id)) return true;
-            // yt-dlp writes bare id; we may store "url:…" — also match bare id if Id is plain.
-            if (!e.Id.Contains(':') && archived.Contains(e.Id)) return true;
-            // Entry id is youtube-style, archive has same.
-            if (e.Id.StartsWith("url:", StringComparison.Ordinal))
-            {
-                // Synthetic keys: also treat as archived if we wrote them after file detect.
-                if (archived.Contains(e.Id)) return true;
-            }
-        }
+        if (string.IsNullOrEmpty(e.Id)) return false;
+        if (archived.Contains(e.Id)) return true;
+        // yt-dlp writes bare id; we may store "url:…" — also match bare id if Id is plain.
+        if (!e.Id.Contains(':') && archived.Contains(e.Id)) return true;
+        if (e.Id.StartsWith("url:", StringComparison.Ordinal) && archived.Contains(e.Id))
+            return true;
         return false;
     }
 

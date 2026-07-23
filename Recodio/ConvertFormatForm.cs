@@ -135,11 +135,16 @@ public class ConvertFormatForm : Form
 
         FormClosing += (_, e) =>
         {
-            if (_cts == null) return;
+            if (_cts == null)
+            {
+                _progress.StopTimer();
+                return;
+            }
             e.Cancel = true;
             _closeRequested = true;
             _cts.Cancel();
         };
+        FormClosed += (_, _) => _progress.StopTimer();
     }
 
     private void CloseIfPending()
@@ -200,7 +205,7 @@ public class ConvertFormatForm : Form
                 _progress.SetItemState(file, QueueItemState.Downloading);
                 _progress.Apply(new DownloadProgressUpdate
                 {
-                    Done = okCount + skipCount,
+                    Done = okCount,
                     Total = files.Count,
                     Skipped = skipCount,
                     Failed = failCount,
@@ -229,7 +234,7 @@ public class ConvertFormatForm : Form
                                         if (IsDisposed) return;
                                         _progress.Apply(new DownloadProgressUpdate
                                         {
-                                            Done = okCount + skipCount,
+                                            Done = okCount,
                                             Total = files.Count,
                                             Skipped = skipCount,
                                             Failed = failCount,
@@ -328,7 +333,9 @@ public class ConvertFormatForm : Form
                 + (skipCount > 0 ? $" · {skipCount} omit" : "")
                 + (failCount > 0 ? $" · {failCount} err" : "")
                 + $" · total {files.Count}");
-            _progress.EndSession(summary, isError: failCount > 0, folderPath: openDir);
+            var cancelled = _cts?.IsCancellationRequested == true;
+            _progress.EndSession(summary, isError: failCount > 0, folderPath: openDir,
+                markComplete: !cancelled && failCount == 0);
 
             if (failCount > 0 && _cts?.IsCancellationRequested != true)
                 MessageBox.Show(this, summary, "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Warning);
