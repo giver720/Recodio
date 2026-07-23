@@ -351,11 +351,13 @@ public class DownloadForm : Form
         catch (Exception ex)
         {
             _lblInfo.Text = "No se pudo analizar la URL.";
-            MessageBox.Show(this,
-                ex.Message + "\n\nSitios soportados: todo lo que entiende yt-dlp "
-                + "(YouTube, X, TikTok, Instagram, SoundCloud, Vimeo, Twitch, Reddit, …).\n"
-                + "Si el sitio pide login, elegi cookies del navegador abajo.",
-                "Error al analizar", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            var msg = CookieManager.IsCookieFailureText(ex.Message)
+                ? CookieManager.FriendlyCookieError(ex.Message)
+                : ex.Message + "\n\nSitios soportados: todo lo que entiende yt-dlp "
+                  + "(YouTube, X, TikTok, Instagram, SoundCloud, Vimeo, Twitch, Reddit, …).\n"
+                  + "Si el sitio pide login: cierra Brave, actualiza yt-dlp, o usa cookies.txt en:\n"
+                  + CookieManager.CookiesFilePath;
+            MessageBox.Show(this, msg, "Error al analizar", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {

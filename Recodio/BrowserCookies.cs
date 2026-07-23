@@ -56,7 +56,7 @@ public static class BrowserCookies
     {
         if (string.IsNullOrWhiteSpace(key))
             return "Sin cookies: solo contenido publico.";
-        return $"Usa cookies de {key} automaticamente en yt-dlp y spotDL. "
-             + "Si falla al leer la base, cierra el navegador un momento y reintenta.";
+        return $"Usa cookies de {key}. Si falla DPAPI, Recodio reintenta sin cookies y puede "
+             + $"cachear en:\n{CookieManager.CookiesFilePath}";
     }
 }

@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.6**
+**Versión actual: 1.3.7**
 
 ## Requisitos
 
@@ -88,6 +88,10 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.7
+- Cookies más robustas: export a `%AppData%\Recodio\cookies.txt`, reintento automático sin cookies si falla DPAPI
+- Mensajes claros en español; link a carpeta de cookies en Configuración
 
 ### 1.3.6
 - **Skip por carpeta**: yt-dlp y spotDL no re-descargan ítems que ya existen en el destino

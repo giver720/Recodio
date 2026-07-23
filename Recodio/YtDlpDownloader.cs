@@ -57,6 +57,29 @@ public static class YtDlpDownloader
     public static async Task<AnalyzeResult> AnalyzeAsync(
         string ytDlpPath, string url, CancellationToken ct, string cookiesFromBrowser = "")
     {
+        // Prefer cookies.txt; if only browser is configured, try a one-shot export first.
+        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && !CookieManager.BrowserCookiesBroken
+            && !File.Exists(CookieManager.CookiesFilePath))
+        {
+            await CookieManager.TryExportBrowserCookiesAsync(ytDlpPath, cookiesFromBrowser, null, ct);
+        }
+
+        var cookies = CookieManager.Resolve(cookiesFromBrowser);
+        try
+        {
+            return await AnalyzeOnceAsync(ytDlpPath, url, cookies, ct);
+        }
+        catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookies.Enabled)
+        {
+            CookieManager.MarkBrowserBroken(ex.Message);
+            // Retry without cookies so public playlists still work.
+            return await AnalyzeOnceAsync(ytDlpPath, url, CookieArgs.None, ct);
+        }
+    }
+
+    private static async Task<AnalyzeResult> AnalyzeOnceAsync(
+        string ytDlpPath, string url, CookieArgs cookies, CancellationToken ct)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = ytDlpPath,
@@ -71,11 +94,7 @@ public static class YtDlpDownloader
             "--flat-playlist", "-J", "--no-warnings",
             "--ignore-no-formats-error", // some flat entries have no formats yet
         };
-        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
-        {
-            args.Add("--cookies-from-browser");
-            args.Add(cookiesFromBrowser.Trim().ToLowerInvariant());
-        }
+        CookieManager.ApplyToArgs(args, cookies);
         args.Add(url);
         foreach (var a in args) psi.ArgumentList.Add(a);
 
@@ -101,9 +120,13 @@ public static class YtDlpDownloader
         var stderr = await stderrTask;
 
         if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
+        {
+            if (CookieManager.IsCookieFailureText(stderr))
+                throw new InvalidOperationException(CookieManager.FriendlyCookieError(stderr));
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr)
                 ? "No se pudo analizar la URL. ¿Es un sitio que yt-dlp soporta?"
                 : stderr);
+        }
 
         using var doc = JsonDocument.Parse(stdout);
         var root = doc.RootElement;
@@ -290,12 +313,21 @@ public static class YtDlpDownloader
         if (sponsorBlock && !useSponsorBlock)
             onLine(">> SponsorBlock omitido (solo aplica a YouTube).");
 
-        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
-            onLine($">> Usando cookies de {cookiesFromBrowser} (sitios con login / age-gate).");
+        // Cookies: try export to cookies.txt once, then resolve file/browser/none.
+        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && !CookieManager.BrowserCookiesBroken)
+        {
+            await CookieManager.TryExportBrowserCookiesAsync(ytDlpPath, cookiesFromBrowser, onLine, ct);
+        }
+        var cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
+        if (cookieArgs.Mode == CookieMode.File)
+            onLine($">> Cookies: archivo {cookieArgs.PathOrKey}");
+        else if (cookieArgs.Mode == CookieMode.Browser)
+            onLine($">> Cookies: navegador {cookieArgs.PathOrKey} (si falla DPAPI se reintenta sin cookies)");
+        else if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && CookieManager.BrowserCookiesBroken)
+            onLine(">> Cookies del navegador desactivadas esta sesion (error DPAPI previo). Continuando sin cookies.");
 
         // Folder scan: skip anything already on disk (even if archive was wiped).
         // Always on — never re-download a video that already exists in the playlist folder.
-        var scanRoot = ResolveScanRoot(destDir, fixedPlaylistFolder);
         var skippedOnDisk = SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
         if (skippedOnDisk > 0)
             onLine($">> Omitidas {skippedOnDisk} ya presentes en carpeta (no se re-descargan).");
@@ -355,12 +387,35 @@ public static class YtDlpDownloader
                 await RunWithAbortRetryAsync(
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
-                    relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                    relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
                     onLine, onProgress, permanentFailures, ct);
+                // If cookie args got disabled mid-run, keep local copy in sync for next pass.
+                cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
             }
             catch (InvalidOperationException ex)
             {
-                onLine($">> Pasada {pass} termino con error: {ex.Message}");
+                if (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
+                {
+                    CookieManager.MarkBrowserBroken(ex.Message);
+                    cookieArgs = CookieArgs.None;
+                    onLine(">> Error de cookies (DPAPI). Reintentando esta pasada sin cookies...");
+                    try
+                    {
+                        await RunWithAbortRetryAsync(
+                            ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
+                            organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
+                            relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
+                            onLine, onProgress, permanentFailures, ct);
+                    }
+                    catch (InvalidOperationException ex2)
+                    {
+                        onLine($">> Pasada {pass} termino con error: {ex2.Message}");
+                    }
+                }
+                else
+                {
+                    onLine($">> Pasada {pass} termino con error: {ex.Message}");
+                }
             }
 
             // After a batch, mark successful downloads into archive from disk + yt-dlp archive.
@@ -445,8 +500,27 @@ public static class YtDlpDownloader
                             ytDlpPath, ffmpegPath, attemptUrl, attemptItems,
                             format, videoQuality, audioQuality,
                             attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
-                            relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                            relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
                             onLine, onProgress, permanentFailures, ct);
+                    }
+                    catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
+                    {
+                        CookieManager.MarkBrowserBroken(ex.Message);
+                        cookieArgs = CookieArgs.None;
+                        onLine(">>   cookies fallaron; reintento sin cookies...");
+                        try
+                        {
+                            await RunWithAbortRetryAsync(
+                                ytDlpPath, ffmpegPath, attemptUrl, attemptItems,
+                                format, videoQuality, audioQuality,
+                                attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
+                                relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
+                                onLine, onProgress, permanentFailures, ct);
+                        }
+                        catch (InvalidOperationException ex2)
+                        {
+                            onLine($">>   fallo: {ex2.Message}");
+                        }
                     }
                     catch (InvalidOperationException ex)
                     {
@@ -692,7 +766,7 @@ public static class YtDlpDownloader
         string ytDlpPath, string ffmpegPath, string url, List<int>? playlistItems,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
-        bool relaxed, bool embedExtras, string cookiesFromBrowser, string? fixedPlaylistFolder,
+        bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
         CancellationToken ct)
     {
@@ -704,7 +778,7 @@ public static class YtDlpDownloader
                 return await RunOnceAsync(
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, sponsorBlock, isPlaylist, destDir, archivePath,
-                    relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                    relaxed, embedExtras, cookies, fixedPlaylistFolder,
                     onLine, onProgress, permanentFailures,
                     code => lastExitCode = code, ct);
             }
@@ -721,7 +795,7 @@ public static class YtDlpDownloader
         string ytDlpPath, string ffmpegPath, string url, List<int>? playlistItems,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
-        bool relaxed, bool embedExtras, string cookiesFromBrowser, string? fixedPlaylistFolder,
+        bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
         Action<int> onExitCode, CancellationToken ct)
     {
@@ -787,13 +861,7 @@ public static class YtDlpDownloader
         };
 
         // Remux/merge requires ffmpeg; if merge fails yt-dlp may leave separate streams.
-        // Force postprocessor to remux into one file when possible (already set via merge-output-format).
-
-        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
-        {
-            args.Add("--cookies-from-browser");
-            args.Add(cookiesFromBrowser.Trim().ToLowerInvariant());
-        }
+        CookieManager.ApplyToArgs(args, cookies);
 
         if (embedExtras)
             args.AddRange(["--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg"]);
@@ -824,10 +892,14 @@ public static class YtDlpDownloader
 
         var softErrorCount = 0;
         string? lastExtractorId = null;
+        var cookieFailSeen = false;
 
         await ProcessRunner.RunAsync(psi, line =>
         {
             onLine(line);
+
+            if (CookieManager.IsCookieFailureText(line))
+                cookieFailSeen = true;
 
             var pm = ProgressRegex.Match(line);
             if (pm.Success
@@ -868,6 +940,13 @@ public static class YtDlpDownloader
                 : "";
             return $"yt-dlp termino con codigo {exitCode}.{hint}";
         }, ct, throwOnPositiveExit: false);
+
+        // Surface cookie/DPAPI failure so the caller can retry without cookies.
+        if (cookieFailSeen && cookies.Enabled)
+        {
+            CookieManager.MarkBrowserBroken("DPAPI/cookie error during download");
+            throw new InvalidOperationException(CookieManager.FriendlyCookieError("Failed to decrypt with DPAPI"));
+        }
 
         return softErrorCount;
     }

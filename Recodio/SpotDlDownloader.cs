@@ -182,8 +182,23 @@ public static class SpotDlDownloader
             : null;
 
         onLine($">> Proveedores de audio: {string.Join(" → ", providers)}");
-        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
-            onLine($">> Cookies de {cookiesFromBrowser} (via yt-dlp) para menos bloqueos de YouTube.");
+
+        // Prefer cookies.txt; try one export from browser if needed.
+        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && !CookieManager.BrowserCookiesBroken)
+        {
+            // spotDL uses yt-dlp under the hood; export with yt-dlp path from PATH if possible.
+            var yt = DependencyChecker.TryFindOnPath("yt-dlp.exe", out var ytp) && ytp != null ? ytp
+                : DependencyChecker.TryFindOnPath("yt-dlp", out ytp) && ytp != null ? ytp
+                : "yt-dlp";
+            await CookieManager.TryExportBrowserCookiesAsync(yt, cookiesFromBrowser, onLine, ct);
+        }
+        var cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
+        if (cookieArgs.Mode == CookieMode.File)
+            onLine($">> Cookies: archivo {cookieArgs.PathOrKey}");
+        else if (cookieArgs.Mode == CookieMode.Browser)
+            onLine($">> Cookies: navegador {cookieArgs.PathOrKey} (si falla DPAPI se sigue sin cookies)");
+        else if (!string.IsNullOrWhiteSpace(cookiesFromBrowser) && CookieManager.BrowserCookiesBroken)
+            onLine(">> Cookies del navegador desactivadas esta sesion (error DPAPI). Continuando sin cookies.");
 
         // Always skip tracks already present as files under dest (playlist re-run safety).
         // When skipExisting is also true, we keep/update the spotDL archive accordingly.
@@ -252,8 +267,26 @@ public static class SpotDlDownloader
                     await RunWithRateLimitRetryAsync(
                         spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
                         attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
-                        archivePath, providers, cookiesFromBrowser,
+                        archivePath, providers, cookieArgs,
                         onLine, onProgress, permanent, ct);
+                }
+                catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
+                {
+                    CookieManager.MarkBrowserBroken(ex.Message);
+                    cookieArgs = CookieArgs.None;
+                    onLine(">> Error de cookies (DPAPI). Reintentando sin cookies...");
+                    try
+                    {
+                        await RunWithRateLimitRetryAsync(
+                            spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
+                            attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
+                            archivePath, providers, cookieArgs,
+                            onLine, onProgress, permanent, ct);
+                    }
+                    catch (InvalidOperationException ex2)
+                    {
+                        onLine($">> Pasada {pass}: {ex2.Message}");
+                    }
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -284,11 +317,26 @@ public static class SpotDlDownloader
                 try
                 {
                     if (File.Exists(errorsPath)) File.Delete(errorsPath);
-                    var failCount = await RunWithRateLimitRetryAsync(
-                        spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
-                        attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
-                        archivePath, providers, cookiesFromBrowser,
-                        onLine, onProgress, permanent, ct, errorsPath);
+                    int failCount;
+                    try
+                    {
+                        failCount = await RunWithRateLimitRetryAsync(
+                            spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
+                            attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
+                            archivePath, providers, cookieArgs,
+                            onLine, onProgress, permanent, ct, errorsPath);
+                    }
+                    catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
+                    {
+                        CookieManager.MarkBrowserBroken(ex.Message);
+                        cookieArgs = CookieArgs.None;
+                        onLine(">> Error de cookies (DPAPI). Reintentando query sin cookies...");
+                        failCount = await RunWithRateLimitRetryAsync(
+                            spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
+                            attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
+                            archivePath, providers, cookieArgs,
+                            onLine, onProgress, permanent, ct, errorsPath);
+                    }
 
                     var failedUrls = ReadFailedUrls(errorsPath);
 
@@ -369,17 +417,35 @@ public static class SpotDlDownloader
                     onLine($">> [{i + 1}/{stillMissing.Count}] {url}");
                 }
 
-                var useCookies = cookiesFromBrowser;
-                // On last attempt force cookies if none set? No — user choice. Just full providers.
                 try
                 {
                     await RunOnceAsync(
                         spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
-                        threads: 1, skipExisting, organizeInFolders, sponsorBlock, destDir,
-                        archivePath, rescueProviders, useCookies,
+                        threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
+                        archivePath, rescueProviders, cookieArgs,
                         onLine, onProgress, permanent, errorsPath: null, ct);
 
                     ok = ArchiveContains(archivePath, url);
+                }
+                catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
+                {
+                    CookieManager.MarkBrowserBroken(ex.Message);
+                    cookieArgs = CookieArgs.None;
+                    onLine(">>   cookies fallaron; reintento sin cookies...");
+                    try
+                    {
+                        await RunOnceAsync(
+                            spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
+                            threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
+                            archivePath, rescueProviders, cookieArgs,
+                            onLine, onProgress, permanent, errorsPath: null, ct);
+                        ok = ArchiveContains(archivePath, url);
+                    }
+                    catch (InvalidOperationException ex2)
+                    {
+                        onLine($">>   fallo: {ex2.Message}");
+                        ok = ArchiveContains(archivePath, url);
+                    }
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -414,7 +480,7 @@ public static class SpotDlDownloader
         string spotdlPath, string ffmpegPath, IReadOnlyList<string> queries,
         string format, string bitrate, bool embedLyrics, int threads,
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
-        string archivePath, IReadOnlyList<string> providers, string cookiesFromBrowser,
+        string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
         Action<string> onLine, Action<int, int> onProgress, HashSet<string> permanent,
         CancellationToken ct, string? errorsPath = null)
     {
@@ -427,7 +493,7 @@ public static class SpotDlDownloader
                 return await RunOnceAsync(
                     spotdlPath, ffmpegPath, queries, format, bitrate, embedLyrics, attemptThreads,
                     skipExisting, organizeInFolders, sponsorBlock, destDir, archivePath,
-                    providers, cookiesFromBrowser, onLine, onProgress, permanent, errorsPath,
+                    providers, cookies, onLine, onProgress, permanent, errorsPath,
                     ct, code => lastExitCode = code);
             }
             catch (InvalidOperationException) when (lastExitCode < 0 && attemptThreads > 1 && attempt <= MaxRateLimitRetries)
@@ -443,7 +509,7 @@ public static class SpotDlDownloader
         string spotdlPath, string ffmpegPath, IReadOnlyList<string> queries,
         string format, string bitrate, bool embedLyrics, int threads,
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
-        string archivePath, IReadOnlyList<string> providers, string cookiesFromBrowser,
+        string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
         Action<string> onLine, Action<int, int> onProgress, HashSet<string> permanent,
         string? errorsPath, CancellationToken ct, Action<int>? onExitCode = null)
     {
@@ -468,12 +534,7 @@ public static class SpotDlDownloader
         foreach (var p in providers)
             psi.ArgumentList.Add(p);
 
-        // Cookies via yt-dlp (spotDL downloads audio through yt-dlp).
-        if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
-        {
-            psi.ArgumentList.Add("--yt-dlp-args");
-            psi.ArgumentList.Add($"--cookies-from-browser {cookiesFromBrowser.Trim().ToLowerInvariant()}");
-        }
+        CookieManager.ApplyToSpotDl(psi, cookies);
 
         var outputTemplate = organizeInFolders
             ? $"{destDir.Replace('\\', '/')}/{{list-name}}/{{artists}} - {{title}}.{{output-ext}}"
@@ -518,11 +579,14 @@ public static class SpotDlDownloader
             psi.ArgumentList.Add(q);
 
         var failCount = 0;
+        var cookieFailSeen = false;
         // throwOnPositiveExit: false — spotDL often exits >0 when some songs failed but the
         // batch finished; we track per-song errors ourselves via log / --save-errors / archive.
         await ProcessRunner.RunAsync(psi, line =>
         {
             onLine(line);
+            if (CookieManager.IsCookieFailureText(line))
+                cookieFailSeen = true;
             var m = CompleteRegex.Match(line);
             if (m.Success
                 && int.TryParse(m.Groups[1].Value, out var done)
@@ -548,6 +612,12 @@ public static class SpotDlDownloader
                 : "";
             return $"spotdl termino con codigo {exitCode}.{hint}";
         }, ct, throwOnPositiveExit: false);
+
+        if (cookieFailSeen && cookies.Enabled)
+        {
+            CookieManager.MarkBrowserBroken("DPAPI/cookie error during spotDL");
+            throw new InvalidOperationException(CookieManager.FriendlyCookieError("Failed to decrypt with DPAPI"));
+        }
 
         // Count failures from save-errors if available (more accurate than log lines).
         if (!string.IsNullOrWhiteSpace(errorsPath) && File.Exists(errorsPath))

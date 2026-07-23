@@ -207,15 +207,39 @@ public class SettingsForm : Form
         y += 22;
         var lblCookiesHint = new Label
         {
-            Text = BrowserCookies.IsBraveInstalled()
-                ? "Brave detectado. Si yt-dlp no puede leer cookies, cierra Brave y reintenta."
-                : "Recomendado: Brave o Chrome logueado en YouTube / sitios con age-gate.",
+            Text = "Si falla DPAPI: cierra el navegador, o exporta cookies.txt a:\n"
+                + CookieManager.CookiesFilePath + "\n"
+                + "(Recodio reintenta solo sin cookies y puede cachear ahi).",
             Location = new Point(10, y),
-            Size = new Size(460, 32),
+            Size = new Size(460, 48),
             ForeColor = SystemColors.GrayText,
         };
         Controls.Add(lblCookiesHint);
-        y += 36;
+        y += 52;
+
+        var btnOpenCookiesDir = new LinkLabel
+        {
+            Text = "Abrir carpeta de cookies (AppData\\Recodio)",
+            Location = new Point(10, y),
+            AutoSize = true,
+        };
+        btnOpenCookiesDir.Click += (_, _) =>
+        {
+            try
+            {
+                AppPaths.EnsureDirs();
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppPaths.DataDir)
+                {
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Recodio");
+            }
+        };
+        Controls.Add(btnOpenCookiesDir);
+        y += 28;
 
         var chkContextMenu = new CheckBox
         {

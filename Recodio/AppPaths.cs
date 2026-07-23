@@ -14,6 +14,8 @@ public static class AppPaths
     public static string ConfigFile => Path.Combine(DataDir, "config.json");
     public static string HistoryFile => Path.Combine(DataDir, "history.json");
     public static string LogFile => Path.Combine(LogDir, "watcher.log");
+    /// <summary>Optional Netscape cookies.txt — preferred over live browser DPAPI reads.</summary>
+    public static string CookiesFile => Path.Combine(DataDir, "cookies.txt");
 
     public static void EnsureDirs()
     {
