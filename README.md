@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.18**
+**Versión actual: 1.3.22**
 
 ## Requisitos
 
@@ -90,6 +90,18 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.22
+- yt-dlp: fix real de "toda descarga termina en error" — `--no-write-all-thumbnails` no es una opcion valida de yt-dlp; el proceso rechazaba el comando completo antes de descargar nada
+- yt-dlp: items sueltos (no playlist) ya no caen en una carpeta "NA" espuria cuando "Subcarpeta" esta activado
+
+### 1.3.21
+- yt-dlp playlists: descarga **item por item por URL directa** (termina de forma predecible)
+- Sin sleeps largos de lista completa; reintentos de conexion con tope fijo
+
+### 1.3.20
+- yt-dlp: fix descargas que fallaban siempre (falsos "Permission denied" como cookies)
+- Mejor deteccion de archivos bajados; no marcar permanentes por coincidencias parciales de id
 
 ### 1.3.19
 - Scroll en ventanas yt-dlp y spotDL; botones fijos abajo

@@ -92,7 +92,6 @@ public static class CookieManager
         [
             "Failed to decrypt with DPAPI",
             "failed to decrypt",
-            "DPAPI",
             "Could not copy Chrome cookie database",
             "Could not find COOKIE",
             "unable to load cookies",
@@ -103,13 +102,22 @@ public static class CookieManager
             "Error loading cookies",
             "Cookies load failure",
             "no such table: cookies",
-            "Permission denied", // often when browser holds the DB
         ];
         foreach (var m in markers)
         {
             if (text.Contains(m, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
+        // DPAPI only when cookies/browser context is present (bare "DPAPI" is too broad).
+        if (text.Contains("DPAPI", StringComparison.OrdinalIgnoreCase)
+            && (text.Contains("cookie", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("browser", StringComparison.OrdinalIgnoreCase)))
+            return true;
+        // Permission denied only when clearly about cookies/DB (file I/O also says this).
+        if (text.Contains("Permission denied", StringComparison.OrdinalIgnoreCase)
+            && (text.Contains("cookie", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("Cookies", StringComparison.OrdinalIgnoreCase)))
+            return true;
         // Chromium app-bound encryption messages
         if (text.Contains("cookie", StringComparison.OrdinalIgnoreCase)
             && text.Contains("decrypt", StringComparison.OrdinalIgnoreCase))

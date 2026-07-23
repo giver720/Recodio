@@ -10,13 +10,15 @@ public sealed class ExistingMediaIndex
         [".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".avi", ".mov", ".aac"];
 
     // Incomplete / junk: never treat as "already downloaded".
-    private const long MinPlausibleBytes = 32 * 1024; // 32 KB
+    // Keep low: short clips / audio can be small; empty stubs are still filtered.
+    private const long MinPlausibleBytes = 4 * 1024; // 4 KB
 
     // Filename stem without extension, lower-invariant, punctuation collapsed.
     private readonly HashSet<string> _stems = new(StringComparer.OrdinalIgnoreCase);
     // Ids found as " [id]" in names (yt-dlp / our template) — primary skip key.
     private readonly HashSet<string> _ids = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _fileNames = [];
+    private readonly List<(string Path, string Name, long Length)> _files = [];
 
     private static readonly Regex BracketIdRegex = new(
         @"\[([A-Za-z0-9_-]{3,})\]", RegexOptions.Compiled);
@@ -36,9 +38,10 @@ public sealed class ExistingMediaIndex
                     if (IsIncompletePath(f)) continue;
                     var ext = Path.GetExtension(f).ToLowerInvariant();
                     if (!MediaExts.Contains(ext)) continue;
+                    long len;
                     try
                     {
-                        var len = new FileInfo(f).Length;
+                        len = new FileInfo(f).Length;
                         if (len < MinPlausibleBytes) continue; // partial / empty
                     }
                     catch { continue; }
@@ -46,6 +49,7 @@ public sealed class ExistingMediaIndex
                     var name = Path.GetFileNameWithoutExtension(f);
                     if (string.IsNullOrWhiteSpace(name)) continue;
                     idx._fileNames.Add(name);
+                    idx._files.Add((f, name, len));
                     idx._stems.Add(Normalize(name));
                     foreach (Match m in BracketIdRegex.Matches(name))
                         idx._ids.Add(m.Groups[1].Value);
@@ -79,8 +83,22 @@ public sealed class ExistingMediaIndex
             : id;
         if (!string.IsNullOrEmpty(bare) && _ids.Contains(bare)) return true;
         if (_ids.Contains(id)) return true;
+
+        // Fallback: id appears in filename (yt-dlp sometimes uses "title-id.ext" without brackets
+        // or "title [id].f395.mp4" intermediate forms already covered by brackets).
+        if (!string.IsNullOrEmpty(bare) && bare.Length >= 6)
+        {
+            foreach (var name in _fileNames)
+            {
+                if (name.Contains(bare, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
         return false;
     }
+
+    /// <summary>Largest media file size under the scanned roots (0 if none).</summary>
+    public long LargestFileBytes => _files.Count == 0 ? 0 : _files.Max(f => f.Length);
 
     /// <summary>
     /// Strict title match for synthetic ids only: exact normalized stem, or stem that is
