@@ -91,6 +91,9 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 
 ## Changelog resumido
 
+### 1.3.19
+- Scroll en ventanas yt-dlp y spotDL; botones fijos abajo
+
 ### 1.3.18
 - yt-dlp: al borrar la carpeta de una playlist, el **archive se limpia** y se vuelve a descargar de verdad
 - La verdad es el **archivo en disco** (no archive fantasma del padre)

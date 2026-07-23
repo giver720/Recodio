@@ -36,6 +36,7 @@ public class DownloadForm : Form
     private readonly Button _btnClose;
     private readonly Action<YtDlpDownloader.RetryPolicy>? _onRetriesChanged;
     private readonly ToolTip _tip = new();
+    private readonly Panel _content; // scrollable body
     private bool _loadingRetryUi;
 
     private List<PlaylistEntry> _entries = [];
@@ -67,9 +68,27 @@ public class DownloadForm : Form
         _onRetriesChanged = onRetriesChanged;
 
         Text = "Descargar con yt-dlp (cualquier sitio)";
-        Size = new Size(680, 760);
+        Size = new Size(700, 720);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(600, 680);
+        MinimumSize = new Size(560, 420);
+
+        // Scrollable body + fixed action bar (so short screens can reach everything).
+        _content = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            Padding = new Padding(0, 0, 8, 0),
+        };
+        var bottom = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 48,
+            Padding = new Padding(8, 8, 12, 8),
+        };
+        Controls.Add(_content);
+        Controls.Add(bottom);
+
+        void Add(Control c) => _content.Controls.Add(c);
 
         var lblUrl = new Label
         {
@@ -77,14 +96,14 @@ public class DownloadForm : Form
             Location = new Point(10, 12),
             AutoSize = true,
         };
-        Controls.Add(lblUrl);
+        Add(lblUrl);
 
         _txtUrl = new TextBox { Location = new Point(10, 32), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
-        Controls.Add(_txtUrl);
+        Add(_txtUrl);
 
         _btnAnalyze = new Button { Text = "Analizar", Location = new Point(560, 31), Size = new Size(90, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         _btnAnalyze.Click += async (_, _) => await AnalyzeAsync();
-        Controls.Add(_btnAnalyze);
+        Add(_btnAnalyze);
 
         _lblInfo = new Label
         {
@@ -94,7 +113,7 @@ public class DownloadForm : Form
             AutoEllipsis = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        Controls.Add(_lblInfo);
+        Add(_lblInfo);
 
         _clbEntries = new CheckedListBox
         {
@@ -103,18 +122,18 @@ public class DownloadForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             CheckOnClick = true,
         };
-        Controls.Add(_clbEntries);
+        Add(_clbEntries);
 
         _btnAll = new Button { Text = "Todos", Location = new Point(10, 210), Size = new Size(80, 22) };
         _btnAll.Click += (_, _) => SetAllChecked(true);
-        Controls.Add(_btnAll);
+        Add(_btnAll);
 
         _btnNone = new Button { Text = "Ninguno", Location = new Point(95, 210), Size = new Size(80, 22) };
         _btnNone.Click += (_, _) => SetAllChecked(false);
-        Controls.Add(_btnNone);
+        Add(_btnNone);
 
         var lblFormat = new Label { Text = "Formato de salida:", Location = new Point(10, 242), AutoSize = true };
-        Controls.Add(lblFormat);
+        Add(lblFormat);
         _cmbFormat = new ComboBox
         {
             Location = new Point(10, 260),
@@ -130,21 +149,21 @@ public class DownloadForm : Form
         ]);
         _cmbFormat.SelectedIndex = 0;
         _cmbFormat.SelectedIndexChanged += (_, _) => UpdateQualityEnabled();
-        Controls.Add(_cmbFormat);
+        Add(_cmbFormat);
 
         var lblVideoQ = new Label { Text = "Calidad de video:", Location = new Point(270, 242), AutoSize = true };
-        Controls.Add(lblVideoQ);
+        Add(lblVideoQ);
         _cmbVideoQuality = new ComboBox { Location = new Point(270, 260), Size = new Size(160, 22), DropDownStyle = ComboBoxStyle.DropDownList };
         _cmbVideoQuality.Items.AddRange(["Mejor disponible", "2160p (4K)", "1440p (2K)", "1080p", "720p", "480p", "360p"]);
         _cmbVideoQuality.SelectedIndex = 0;
-        Controls.Add(_cmbVideoQuality);
+        Add(_cmbVideoQuality);
 
         var lblAudioQ = new Label { Text = "Calidad de audio:", Location = new Point(450, 242), AutoSize = true };
-        Controls.Add(lblAudioQ);
+        Add(lblAudioQ);
         _cmbAudioQuality = new ComboBox { Location = new Point(450, 260), Size = new Size(200, 22), DropDownStyle = ComboBoxStyle.DropDownList, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         _cmbAudioQuality.Items.AddRange(["Alta", "Media (192k)", "Baja (128k)"]);
         _cmbAudioQuality.SelectedIndex = 0;
-        Controls.Add(_cmbAudioQuality);
+        Add(_cmbAudioQuality);
 
         var lblCookies = new Label
         {
@@ -152,7 +171,7 @@ public class DownloadForm : Form
             Location = new Point(10, 292),
             AutoSize = true,
         };
-        Controls.Add(lblCookies);
+        Add(lblCookies);
         _cmbCookies = new ComboBox
         {
             Location = new Point(10, 310),
@@ -165,7 +184,7 @@ public class DownloadForm : Form
         {
             _onCookiesChanged?.Invoke(SelectedCookiesBrowser());
         };
-        Controls.Add(_cmbCookies);
+        Add(_cmbCookies);
         var tipCookies = new ToolTip();
         tipCookies.SetToolTip(_cmbCookies, BrowserCookies.HintFor(cookiesBrowser));
 
@@ -176,7 +195,7 @@ public class DownloadForm : Form
             AutoSize = true,
             Checked = true,
         };
-        Controls.Add(_chkOrganizeFolders);
+        Add(_chkOrganizeFolders);
 
         _chkRemoveSponsors = new CheckBox
         {
@@ -185,10 +204,10 @@ public class DownloadForm : Form
             AutoSize = true,
             Checked = false,
         };
-        Controls.Add(_chkRemoveSponsors);
+        Add(_chkRemoveSponsors);
 
         // --- Retry policy (user controlled) ---
-        Controls.Add(new Label
+        Add(new Label
         {
             Text = "Reintentos:",
             Location = new Point(10, 394),
@@ -201,26 +220,26 @@ public class DownloadForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
         _cmbRetryPreset.Items.AddRange(["Rapido", "Equilibrado", "Persistente", "Personalizado"]);
-        Controls.Add(_cmbRetryPreset);
+        Add(_cmbRetryPreset);
         _tip.SetToolTip(_cmbRetryPreset,
             "Rapido = pocos reintentos (termina antes).\n" +
             "Equilibrado = valor por defecto.\n" +
             "Persistente = mas reintentos (playlists dificiles).\n" +
             "Personalizado = ajusta los numeros a mano.");
 
-        Controls.Add(new Label { Text = "Pasadas lista:", Location = new Point(210, 394), AutoSize = true });
+        Add(new Label { Text = "Pasadas lista:", Location = new Point(210, 394), AutoSize = true });
         _numBatchPasses = MakeRetryNum(300, 391, 1, 4, 2);
         _tip.SetToolTip(_numBatchPasses, "Cuantas veces re-correr la playlist completa (1–4).");
 
-        Controls.Add(new Label { Text = "Por item:", Location = new Point(360, 394), AutoSize = true });
+        Add(new Label { Text = "Por item:", Location = new Point(360, 394), AutoSize = true });
         _numPerItem = MakeRetryNum(420, 391, 1, 5, 2);
         _tip.SetToolTip(_numPerItem, "Intentos uno por uno si fallo en la lista (1–5).");
 
-        Controls.Add(new Label { Text = "Conexion:", Location = new Point(480, 394), AutoSize = true });
+        Add(new Label { Text = "Conexion:", Location = new Point(480, 394), AutoSize = true });
         _numAbort = MakeRetryNum(540, 391, 0, 3, 1);
         _tip.SetToolTip(_numAbort, "Reintentos si se corta la conexion mid-download (0–3).");
 
-        Controls.Add(new Label { Text = "yt-dlp --retries:", Location = new Point(10, 422), AutoSize = true });
+        Add(new Label { Text = "yt-dlp --retries:", Location = new Point(10, 422), AutoSize = true });
         _numCliRetries = MakeRetryNum(115, 419, 1, 15, 5);
         _tip.SetToolTip(_numCliRetries, "Reintentos internos de yt-dlp por fragmento/red (1–15).");
 
@@ -239,9 +258,9 @@ public class DownloadForm : Form
         _numCliRetries.ValueChanged += retryChanged;
 
         var lblDest = new Label { Text = "Carpeta de destino:", Location = new Point(10, 450), AutoSize = true };
-        Controls.Add(lblDest);
+        Add(lblDest);
         _txtDest = new TextBox { Text = initialDestDir, Location = new Point(10, 468), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
-        Controls.Add(_txtDest);
+        Add(_txtDest);
         var btnDest = new Button { Text = "...", Location = new Point(560, 467), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         btnDest.Click += (_, _) =>
         {
@@ -250,7 +269,7 @@ public class DownloadForm : Form
             _txtDest.Text = fbd.SelectedPath;
             _onDestDirChanged(fbd.SelectedPath);
         };
-        Controls.Add(btnDest);
+        Add(btnDest);
 
         _txtDest.Leave += (_, _) =>
         {
@@ -258,23 +277,46 @@ public class DownloadForm : Form
             if (typed.Length > 0) _onDestDirChanged(typed);
         };
 
-        _progress = new DownloadProgressPanel(10, 500, 640, this);
+        _progress = new DownloadProgressPanel(10, 500, 640, _content);
+        // Ensure scroll range covers progress panel bottom
+        _content.AutoScrollMinSize = new Size(0, 500 + DownloadProgressPanel.PreferredHeight + 24);
 
-        _btnDownload = new Button { Text = "Descargar", Location = new Point(385, 720), Size = new Size(90, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        // Resize wide controls with the scroll panel (minus scrollbar).
+        _content.Resize += (_, _) =>
+        {
+            var w = Math.Max(400, _content.ClientSize.Width - 28);
+            _txtUrl.Width = Math.Max(200, w - 110);
+            _btnAnalyze.Left = _txtUrl.Right + 8;
+            _lblInfo.Width = w;
+            _clbEntries.Width = w;
+            _cmbAudioQuality.Width = Math.Max(120, w - 440);
+            _txtDest.Width = Math.Max(200, w - 50);
+            btnDest.Left = _txtDest.Right + 6;
+            _progress.Host.Width = w;
+        };
+
+        _btnDownload = new Button { Text = "Descargar", Size = new Size(90, 28) };
         _btnDownload.Click += async (_, _) => await StartDownloadAsync();
-        Controls.Add(_btnDownload);
-
-        _btnCancel = new Button { Text = "Cancelar", Location = new Point(480, 720), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
+        _btnCancel = new Button { Text = "Cancelar", Size = new Size(80, 28), Enabled = false };
         _btnCancel.Click += (_, _) =>
         {
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
-        Controls.Add(_btnCancel);
-
-        _btnClose = new Button { Text = "Cerrar", Location = new Point(565, 720), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnClose = new Button { Text = "Cerrar", Size = new Size(85, 28) };
         _btnClose.Click += (_, _) => Close();
-        Controls.Add(_btnClose);
+
+        var buttonRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Padding = new Padding(0),
+        };
+        buttonRow.Controls.Add(_btnClose);
+        buttonRow.Controls.Add(_btnCancel);
+        buttonRow.Controls.Add(_btnDownload);
+        bottom.Controls.Add(buttonRow);
 
         _txtUrl.TextChanged += (_, _) => WarnIfUrlDrifted();
 
@@ -336,7 +378,7 @@ public class DownloadForm : Form
             Maximum = max,
             Value = Math.Clamp(value, min, max),
         };
-        Controls.Add(n);
+        _content.Controls.Add(n);
         return n;
     }
 

@@ -33,6 +33,7 @@ public class SpotDlForm : Form
     private readonly DownloadProgressPanel _progress;
     private readonly Button _btnDownload;
     private readonly Button _btnCancel;
+    private readonly Panel _content;
     private readonly ToolTip _tip = new();
 
     private List<SpotDlTrack> _tracks = [];
@@ -56,15 +57,32 @@ public class SpotDlForm : Form
         _onHistory = onHistory;
 
         Text = "Descargar con spotDL";
-        Size = new Size(720, 880);
+        Size = new Size(740, 780);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(660, 780);
+        MinimumSize = new Size(560, 420);
 
-        _progress = new DownloadProgressPanel(10, 580, 690, this);
+        _content = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            Padding = new Padding(0, 0, 8, 0),
+        };
+        var bottom = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 48,
+            Padding = new Padding(8, 8, 12, 8),
+        };
+        Controls.Add(_content);
+        Controls.Add(bottom);
+        void Add(Control c) => _content.Controls.Add(c);
+
+        // Create early so queue handlers can reference _progress safely.
+        _progress = new DownloadProgressPanel(10, 10, 690, _content);
 
         var y = 10;
 
-        Controls.Add(new Label
+        Add(new Label
         {
             Text = "URL de Spotify (cancion/album/playlist/artista) o busqueda:",
             Location = new Point(10, y),
@@ -78,7 +96,7 @@ public class SpotDlForm : Form
             Size = new Size(580, 22),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        Controls.Add(_txtQuery);
+        Add(_txtQuery);
 
         _btnAnalyze = new Button
         {
@@ -88,7 +106,7 @@ public class SpotDlForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         _btnAnalyze.Click += async (_, _) => await AnalyzeAsync();
-        Controls.Add(_btnAnalyze);
+        Add(_btnAnalyze);
         _tip.SetToolTip(_btnAnalyze, "Lista las canciones sin descargar audio (spotdl save).");
         y += 30;
 
@@ -100,7 +118,7 @@ public class SpotDlForm : Form
             AutoEllipsis = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        Controls.Add(_lblInfo);
+        Add(_lblInfo);
         y += 22;
 
         _clbTracks = new CheckedListBox
@@ -111,17 +129,17 @@ public class SpotDlForm : Form
             CheckOnClick = true,
             HorizontalScrollbar = true,
         };
-        Controls.Add(_clbTracks);
+        Add(_clbTracks);
         y += 116;
 
         var btnAll = new Button { Text = "Todos", Location = new Point(10, y), Size = new Size(70, 24) };
         btnAll.Click += (_, _) => SetAllChecked(true);
-        Controls.Add(btnAll);
+        Add(btnAll);
         var btnNone = new Button { Text = "Ninguno", Location = new Point(86, y), Size = new Size(70, 24) };
         btnNone.Click += (_, _) => SetAllChecked(false);
-        Controls.Add(btnNone);
+        Add(btnNone);
 
-        Controls.Add(new Label
+        Add(new Label
         {
             Text = "Cola (otras URLs en orden; ignora la lista de arriba):",
             Location = new Point(170, y + 4),
@@ -135,7 +153,7 @@ public class SpotDlForm : Form
             Size = new Size(580, 52),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        Controls.Add(_lstQueue);
+        Add(_lstQueue);
 
         var btnAddQ = new Button
         {
@@ -161,7 +179,7 @@ public class SpotDlForm : Form
             _progress.SetStats($"Cola: {_queue.Count} URL(s) pendientes");
             _progress.SetStatus("Item agregado a la cola.");
         };
-        Controls.Add(btnAddQ);
+        Add(btnAddQ);
 
         var btnRemQ = new Button
         {
@@ -180,7 +198,7 @@ public class SpotDlForm : Form
                 ? $"Cola: {_queue.Count} URL(s) pendientes"
                 : "Cola: —");
         };
-        Controls.Add(btnRemQ);
+        Add(btnRemQ);
         y += 60;
 
         var grp = new GroupBox
@@ -190,7 +208,7 @@ public class SpotDlForm : Form
             Size = new Size(690, 220),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
-        Controls.Add(grp);
+        Add(grp);
 
         grp.Controls.Add(new Label { Text = "Formato:", Location = new Point(10, 22), AutoSize = true });
         _cmbFormat = new ComboBox
@@ -350,11 +368,11 @@ public class SpotDlForm : Form
 
         y += 230;
 
-        Controls.Add(new Label { Text = "Carpeta de destino:", Location = new Point(10, y), AutoSize = true });
+        Add(new Label { Text = "Carpeta de destino:", Location = new Point(10, y), AutoSize = true });
         y += 18;
         _txtDest.Location = new Point(10, y);
         _txtDest.Size = new Size(620, 22);
-        Controls.Add(_txtDest);
+        Add(_txtDest);
         var btnDest = new Button
         {
             Text = "...",
@@ -369,29 +387,41 @@ public class SpotDlForm : Form
             _txtDest.Text = fbd.SelectedPath;
             PersistSettings();
         };
-        Controls.Add(btnDest);
+        Add(btnDest);
         _txtDest.Leave += (_, _) => PersistSettings();
         y += 30;
 
         _progress.Host.Location = new Point(10, y);
-        y += DownloadProgressPanel.PreferredHeight + 8;
+        y += DownloadProgressPanel.PreferredHeight + 16;
+        _content.AutoScrollMinSize = new Size(0, y);
+
+        _content.Resize += (_, _) =>
+        {
+            var w = Math.Max(400, _content.ClientSize.Width - 28);
+            _txtQuery.Width = Math.Max(200, w - 120);
+            _btnAnalyze.Left = _txtQuery.Right + 8;
+            _lblInfo.Width = w;
+            _clbTracks.Width = w;
+            _lstQueue.Width = Math.Max(200, w - 120);
+            btnAddQ.Left = _lstQueue.Right + 8;
+            btnRemQ.Left = btnAddQ.Left;
+            grp.Width = w;
+            _txtDest.Width = Math.Max(200, w - 70);
+            btnDest.Left = _txtDest.Right + 6;
+            _progress.Host.Width = w;
+        };
 
         _btnDownload = new Button
         {
             Text = "Descargar",
-            Location = new Point(520, 820),
             Size = new Size(90, 28),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _btnDownload.Click += async (_, _) => await StartDownloadAsync();
-        Controls.Add(_btnDownload);
 
         _btnCancel = new Button
         {
             Text = "Cancelar",
-            Location = new Point(620, 820),
             Size = new Size(80, 28),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             Enabled = false,
         };
         _btnCancel.Click += (_, _) =>
@@ -399,7 +429,17 @@ public class SpotDlForm : Form
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
-        Controls.Add(_btnCancel);
+
+        var buttonRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Padding = new Padding(0),
+        };
+        buttonRow.Controls.Add(_btnCancel);
+        buttonRow.Controls.Add(_btnDownload);
+        bottom.Controls.Add(buttonRow);
 
         FormClosing += (_, e) =>
         {
