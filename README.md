@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.7**
+**Versión actual: 1.3.8**
 
 ## Requisitos
 
@@ -73,6 +73,7 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - **Omite videos ya en la carpeta** al re-bajar playlists (escaneo de disco + archive)
 - Subcarpeta por playlist + archivo **.m3u**
 - Reintentos de playlist y por ítem; SponsorBlock (solo YouTube)
+- Progreso con **%**, cola de items y estado (sin volcar el log crudo)
 
 ### spotDL (Spotify)
 - **Analizar** playlist/álbum: lista tracks, desmarcá las que no quieras
@@ -81,6 +82,7 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - **Omite canciones ya en la carpeta** (match Artista - Título + archive)
 - Reintentos por batch y canción por canción
 - Cola de varias URLs, subcarpetas por playlist/álbum, SponsorBlock, letras Genius + Musixmatch
+- Progreso con **%**, cola de URLs/canciones y estado actual
 
 ### Conversión (ffmpeg)
 - Muchos formatos audio/video
@@ -88,6 +90,10 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.8
+- **UI de progreso** en yt-dlp y spotDL: se eliminó el log de texto grande
+- Barra con **porcentaje**, línea de **cola** (items/canciones/URLs) y estado del archivo/canción actual
 
 ### 1.3.7
 - Cookies más robustas: export a `%AppData%\Recodio\cookies.txt`, reintento automático sin cookies si falla DPAPI

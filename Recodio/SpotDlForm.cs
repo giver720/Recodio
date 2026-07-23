@@ -1,7 +1,19 @@
+using System.Text.RegularExpressions;
+
 namespace Recodio;
 
 public class SpotDlForm : Form
 {
+    private static readonly Regex DownloadedRegex = new(
+        @"Downloaded\s+""?(.+?)""?\s*:|Downloading\s+(.+?)(?:\s+\(|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex FoundRegex = new(
+        @"Found\s+YouTube(?:\s+Music)?\s+URL\s+for\s+""?(.+?)""?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex SkippingRegex = new(
+        @"Skipping\s+(.+?)(?:\s+\(|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private record QueueItem(string Label, string Query);
 
     private readonly string _spotdlPath;
@@ -30,9 +42,7 @@ public class SpotDlForm : Form
     private readonly CheckBox _chkBc;
     private readonly ComboBox _cmbCookies;
     private readonly TextBox _txtDest;
-    private readonly ProgressBar _progressBar;
-    private readonly Label _lblProgress;
-    private readonly TextBox _txtLog;
+    private readonly DownloadProgressPanel _progress;
     private readonly Button _btnDownload;
     private readonly Button _btnCancel;
     private readonly ToolTip _tip = new();
@@ -41,6 +51,13 @@ public class SpotDlForm : Form
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _analyzeCts;
     private bool _closeRequested;
+
+    // Live progress
+    private int _jobIndex;      // 0-based
+    private int _jobCount;
+    private int _songDone;
+    private int _songTotal;
+    private string _jobLabel = "";
 
     public SpotDlForm(string spotdlPath, string ffmpegPath, AppConfig config,
         Action onSettingsChanged, Action saveConfig,
@@ -54,9 +71,12 @@ public class SpotDlForm : Form
         _onHistory = onHistory;
 
         Text = "Descargar con spotDL";
-        Size = new Size(700, 920);
+        Size = new Size(700, 760);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(640, 780);
+        MinimumSize = new Size(640, 680);
+
+        // Create early so queue handlers can update progress safely.
+        _progress = new DownloadProgressPanel(10, 580, 670, this);
 
         var y = 10;
 
@@ -155,6 +175,8 @@ public class SpotDlForm : Form
             _tracks.Clear();
             _clbTracks.Items.Clear();
             _lblInfo.Text = "Agregado a la cola.";
+            _progress.SetQueue($"Cola: {_queue.Count} URL(s) pendientes");
+            _progress.SetStatus("Item agregado a la cola.");
         };
         Controls.Add(btnAddQ);
 
@@ -171,6 +193,9 @@ public class SpotDlForm : Form
             if (idx < 0) return;
             _queue.RemoveAt(idx);
             _lstQueue.Items.RemoveAt(idx);
+            _progress.SetQueue(_queue.Count > 0
+                ? $"Cola: {_queue.Count} URL(s) pendientes"
+                : "Cola: —");
         };
         Controls.Add(btnRemQ);
         y += 66;
@@ -367,35 +392,13 @@ public class SpotDlForm : Form
         _txtDest.Leave += (_, _) => PersistSettings();
         y += 32;
 
-        _progressBar = new ProgressBar
-        {
-            Location = new Point(10, y),
-            Size = new Size(670, 20),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-        };
-        Controls.Add(_progressBar);
-        y += 24;
-
-        _lblProgress = new Label { Text = "", Location = new Point(10, y), AutoSize = true };
-        Controls.Add(_lblProgress);
-        y += 22;
-
-        _txtLog = new TextBox
-        {
-            Location = new Point(10, y),
-            Size = new Size(670, 200),
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            Font = new Font(FontFamily.GenericMonospace, 8.5f),
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
-        };
-        Controls.Add(_txtLog);
+        _progress.Host.Location = new Point(10, y);
+        y += 100;
 
         _btnDownload = new Button
         {
             Text = "Descargar",
-            Location = new Point(504, 850),
+            Location = new Point(504, y),
             Size = new Size(90, 28),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
@@ -405,7 +408,7 @@ public class SpotDlForm : Form
         _btnCancel = new Button
         {
             Text = "Cancelar",
-            Location = new Point(600, 850),
+            Location = new Point(600, y),
             Size = new Size(80, 28),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
             Enabled = false,
@@ -416,6 +419,10 @@ public class SpotDlForm : Form
             _analyzeCts?.Cancel();
         };
         Controls.Add(_btnCancel);
+
+        // Keep buttons above bottom when form is taller
+        _btnDownload.Location = new Point(504, 690);
+        _btnCancel.Location = new Point(600, 690);
 
         FormClosing += (_, e) =>
         {
@@ -434,7 +441,7 @@ public class SpotDlForm : Form
                 if (clip != null)
                 {
                     _txtQuery.Text = clip;
-                    AppendLog(">> URL de Spotify detectada en el portapapeles.");
+                    _progress.SetStatus("URL de Spotify detectada en el portapapeles.");
                 }
             }
             _txtQuery.Focus();
@@ -516,6 +523,7 @@ public class SpotDlForm : Form
         _btnAnalyze.Enabled = false;
         _btnDownload.Enabled = false;
         _lblInfo.Text = "Analizando metadata de Spotify (sin descargar audio)...";
+        _progress.SetStatus("Analizando playlist/cancion...");
         _clbTracks.Items.Clear();
         _tracks = [];
         _analyzeCts = new CancellationTokenSource();
@@ -535,15 +543,19 @@ public class SpotDlForm : Form
             _lblInfo.Text = $"{listLabel}: {_tracks.Count} cancion(es)"
                 + (already > 0 ? $", {already} ya en archive (desmarcadas)" : "")
                 + ". Desmarca las que no quieras.";
-            AppendLog($">> Preview: {_tracks.Count} tracks ({listLabel}).");
+            _progress.SetQueue($"Preview: {_tracks.Count} cancion(es)"
+                + (already > 0 ? $", {already} ya bajadas" : ""));
+            _progress.SetStatus($"Listo: {listLabel}");
         }
         catch (OperationCanceledException)
         {
             _lblInfo.Text = "Analisis cancelado.";
+            _progress.SetStatus("Analisis cancelado.");
         }
         catch (Exception ex)
         {
             _lblInfo.Text = "No se pudo analizar.";
+            _progress.SetStatus("Error al analizar.", isError: true);
             MessageBox.Show(this, ex.Message, "Error al analizar", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -607,12 +619,16 @@ public class SpotDlForm : Form
         _btnDownload.Enabled = false;
         _btnAnalyze.Enabled = false;
         _btnCancel.Enabled = true;
-        _progressBar.Value = 0;
-        _txtLog.Clear();
-        AppendLog($">> Carpeta: {destDir}");
-        AppendLog($">> Proveedores: {string.Join(" → ", providers)}");
-        if (!string.IsNullOrEmpty(cookies))
-            AppendLog($">> Cookies: {cookies}");
+
+        _jobCount = jobs.Count;
+        _jobIndex = 0;
+        _songDone = 0;
+        _songTotal = 0;
+        _progress.Reset(
+            queueText: _jobCount > 1
+                ? $"Cola: 0 / {_jobCount} URLs"
+                : "Cola: 1 trabajo",
+            status: "Iniciando descarga...");
 
         _cts = new CancellationTokenSource();
         var totalOk = 0;
@@ -622,12 +638,18 @@ public class SpotDlForm : Form
             for (var i = 0; i < jobs.Count; i++)
             {
                 var job = jobs[i];
-                _lblProgress.Text = jobs.Count > 1
-                    ? $"Cola {i + 1} de {jobs.Count}: {job.Label}"
-                    : "Descargando...";
-                AppendLog($">> {job.Label}");
+                _jobIndex = i;
+                _jobLabel = job.Label;
+                _songDone = 0;
+                _songTotal = job.TrackUrls?.Count ?? 0;
 
-                var lastTotal = job.TrackUrls?.Count ?? 0;
+                Ui(() =>
+                {
+                    RefreshQueueUi();
+                    _progress.SetStatus($"Iniciando: {job.Label}");
+                    _progress.SetCurrent("");
+                });
+
                 // Pass track metadata so folder scan can skip "Artist - Title" files already on disk.
                 IReadOnlyList<SpotDlTrack>? meta = null;
                 if (job.TrackUrls is { Count: > 0 } && _tracks.Count > 0)
@@ -642,19 +664,23 @@ public class SpotDlForm : Form
                     _config.SpotDlThreads, _config.SpotDlSkipExisting,
                     _config.SpotDlOrganizeInFolders, _config.SpotDlSponsorBlock, destDir,
                     providers, cookies,
-                    onLine: AppendLog,
+                    onLine: HandleDownloadLine,
                     onProgress: (done, total) =>
                     {
-                        lastTotal = Math.Max(lastTotal, total);
-                        SetProgress(done, total);
+                        try
+                        {
+                            if (IsDisposed || !IsHandleCreated) return;
+                            BeginInvoke(() => ApplySongProgress(done, total));
+                        }
+                        catch { /* dispose race */ }
                     },
                     _cts.Token,
                     knownTracksMeta: meta);
 
                 totalFail += failCount;
-                totalOk += Math.Max(lastTotal - failCount, 0);
+                totalOk += Math.Max(_songTotal - failCount, 0);
 
-                var status = failCount == 0 ? "ok" : lastTotal > 0 && failCount < lastTotal ? "partial" : "fail";
+                var status = failCount == 0 ? "ok" : _songTotal > 0 && failCount < _songTotal ? "partial" : "fail";
                 _onHistory?.Invoke(new HistoryEntry
                 {
                     Name = job.Label.Length > 80 ? job.Label[..77] + "..." : job.Label,
@@ -666,11 +692,19 @@ public class SpotDlForm : Form
             }
 
             var summary = totalFail > 0
-                ? $"Descarga completa: {totalOk} ok, {totalFail} con error (revisa el log)."
+                ? $"Descarga completa: {totalOk} ok, {totalFail} con error."
                 : totalOk > 0
                     ? $"Descarga completa: {totalOk} cancion(es) OK."
                     : "Descarga completa.";
-            AppendLog($">> {summary}");
+            Ui(() =>
+            {
+                _progress.SetPercent(100);
+                _progress.SetQueue(_jobCount > 1
+                    ? $"Cola: {_jobCount} / {_jobCount} URLs terminadas"
+                    : $"Canciones: {totalOk} ok" + (totalFail > 0 ? $", {totalFail} error" : ""));
+                _progress.SetStatus(summary, isError: totalFail > 0);
+                _progress.SetCurrent("");
+            });
             MessageBox.Show(this, summary, "Recodio");
 
             if (_queue.Count > 0)
@@ -682,11 +716,11 @@ public class SpotDlForm : Form
         }
         catch (OperationCanceledException)
         {
-            AppendLog(">> Descarga cancelada.");
+            Ui(() => _progress.SetStatus("Descarga cancelada."));
         }
         catch (Exception ex)
         {
-            AppendLog($">> ERROR: {ex.Message}");
+            Ui(() => _progress.SetStatus(ex.Message, isError: true));
             _onHistory?.Invoke(new HistoryEntry
             {
                 Name = jobs.Count > 0 ? (jobs[0].Label ?? "spotDL") : "spotDL",
@@ -708,23 +742,132 @@ public class SpotDlForm : Form
         }
     }
 
-    private void SetProgress(int done, int total)
+    private void RefreshQueueUi()
     {
-        if (InvokeRequired) { Invoke(() => SetProgress(done, total)); return; }
-        _progressBar.Maximum = Math.Max(total, 1);
-        _progressBar.Value = Math.Clamp(done, 0, _progressBar.Maximum);
-        _lblProgress.Text = $"{done} de {total} completadas";
+        if (_jobCount > 1)
+        {
+            _progress.SetQueue(
+                $"Cola URL {_jobIndex + 1} / {_jobCount}: {_jobLabel}"
+                + (_songTotal > 0 ? $" · canciones {_songDone}/{_songTotal}" : ""));
+        }
+        else if (_songTotal > 0)
+        {
+            _progress.SetQueue($"Canciones: {_songDone} / {_songTotal}");
+        }
+        else
+        {
+            _progress.SetQueue($"Trabajo: {_jobLabel}");
+        }
     }
 
-    private void AppendLog(string line)
+    private void ApplySongProgress(int done, int total)
+    {
+        try
+        {
+            if (IsDisposed || _progress.Bar.IsDisposed) return;
+            _songDone = Math.Max(0, done);
+            _songTotal = Math.Max(_songTotal, total);
+            if (_songTotal <= 0) _songTotal = Math.Max(total, 1);
+
+            // Overall across multi-URL queue + songs inside current job
+            if (_jobCount > 1)
+            {
+                var jobFrac = _songTotal > 0 ? (double)_songDone / _songTotal : 0;
+                var overall = (int)Math.Round((_jobIndex + jobFrac) * 100.0 / _jobCount);
+                _progress.SetPercent(overall);
+            }
+            else
+            {
+                var pct = _songTotal > 0
+                    ? (int)Math.Round(100.0 * _songDone / _songTotal)
+                    : 0;
+                _progress.SetPercent(pct);
+            }
+
+            RefreshQueueUi();
+            if (_songDone >= _songTotal && _songTotal > 0)
+                _progress.SetStatus($"Lote listo ({_songDone}/{_songTotal}).");
+            else
+                _progress.SetStatus($"Descargando canciones… {_songDone} de {_songTotal}");
+        }
+        catch { /* dispose race */ }
+    }
+
+    private void HandleDownloadLine(string line)
     {
         try
         {
             if (IsDisposed) return;
-            if (InvokeRequired) { BeginInvoke(() => AppendLog(line)); return; }
-            if (_txtLog.IsDisposed) return;
-            _txtLog.AppendText(line + Environment.NewLine);
+            if (InvokeRequired) { BeginInvoke(() => HandleDownloadLine(line)); return; }
+            if (string.IsNullOrWhiteSpace(line)) return;
+
+            if (line.StartsWith(">> ", StringComparison.Ordinal))
+            {
+                var msg = line[3..].Trim();
+                _progress.SetStatus(msg, isError: msg.Contains("ERROR", StringComparison.OrdinalIgnoreCase)
+                    || msg.Contains("error", StringComparison.OrdinalIgnoreCase));
+                return;
+            }
+
+            var skip = SkippingRegex.Match(line);
+            if (skip.Success)
+            {
+                var name = skip.Groups[1].Value.Trim().Trim('"');
+                if (!string.IsNullOrEmpty(name))
+                    _progress.SetCurrent(name + " (omitida)");
+                _progress.SetStatus("Omitiendo ya descargada...");
+                return;
+            }
+
+            var found = FoundRegex.Match(line);
+            if (found.Success)
+            {
+                var name = found.Groups[1].Value.Trim().Trim('"');
+                if (!string.IsNullOrEmpty(name))
+                    _progress.SetCurrent(name);
+                _progress.SetStatus("Buscando audio...");
+                return;
+            }
+
+            var dl = DownloadedRegex.Match(line);
+            if (dl.Success)
+            {
+                var name = (dl.Groups[1].Success ? dl.Groups[1].Value : dl.Groups[2].Value).Trim().Trim('"');
+                if (!string.IsNullOrEmpty(name))
+                    _progress.SetCurrent(name);
+                if (line.Contains("Downloaded", StringComparison.OrdinalIgnoreCase))
+                    _progress.SetStatus("Cancion descargada.");
+                else
+                    _progress.SetStatus("Descargando cancion...");
+                return;
+            }
+
+            if (line.Contains("Processing", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Converting", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Embedding", StringComparison.OrdinalIgnoreCase))
+            {
+                _progress.SetStatus("Procesando audio / metadata...");
+                return;
+            }
+
+            if (line.Contains("Error", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("ERROR", StringComparison.Ordinal))
+            {
+                var shortErr = line.Length > 120 ? line[..117] + "..." : line;
+                _progress.SetStatus(shortErr, isError: true);
+            }
         }
         catch (ObjectDisposedException) { /* form closed mid-download */ }
+    }
+
+    private void Ui(Action action)
+    {
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(action); return; }
+            action();
+        }
+        catch (ObjectDisposedException) { /* form closed */ }
     }
 }
