@@ -63,9 +63,10 @@ public static class FormatConverter
 
     private static readonly Regex TimeRegex = new(@"time=(\d\d:\d\d:\d\d\.\d\d)", RegexOptions.Compiled);
 
+    // onFileExists: skip | overwrite | rename
     public static async Task<ConversionResult> ConvertAsync(
         string ffmpegPath, string inputPath, string outputDir, string formatKey, string quality,
-        Action<int>? onProgress = null)
+        Action<int>? onProgress = null, string onFileExists = "skip")
     {
         var (ready, notReadyReason) = await WaitUntilReadyAsync(inputPath);
         if (!ready)
@@ -81,7 +82,21 @@ public static class FormatConverter
             outPath = Path.Combine(destDir, Path.GetFileNameWithoutExtension(inputPath) + " (convertido)" + spec.Extension);
 
         if (File.Exists(outPath))
-            return new ConversionResult(false, true, outPath, $"ya existe un archivo {spec.Extension} con ese nombre");
+        {
+            var policy = (onFileExists ?? "skip").ToLowerInvariant();
+            if (policy == "overwrite")
+            {
+                // ffmpeg -y already overwrites; keep path as-is
+            }
+            else if (policy == "rename")
+            {
+                outPath = NextAvailablePath(outPath);
+            }
+            else
+            {
+                return new ConversionResult(false, true, outPath, $"ya existe un archivo {spec.Extension} con ese nombre");
+            }
+        }
 
         var durationSeconds = await GetDurationSecondsAsync(ffmpegPath, inputPath);
 
@@ -123,6 +138,19 @@ public static class FormatConverter
         var ok = proc.ExitCode == 0 && File.Exists(outPath) && new FileInfo(outPath).Length > 0;
         if (ok) onProgress?.Invoke(100);
         return new ConversionResult(ok, false, outPath, logBuilder.ToString());
+    }
+
+    private static string NextAvailablePath(string path)
+    {
+        var dir = Path.GetDirectoryName(path)!;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var ext = Path.GetExtension(path);
+        for (var i = 2; i < 10_000; i++)
+        {
+            var candidate = Path.Combine(dir, $"{name} ({i}){ext}");
+            if (!File.Exists(candidate)) return candidate;
+        }
+        return Path.Combine(dir, $"{name} ({Guid.NewGuid():N}){ext}");
     }
 
     private static double ParseTimecode(string tc)

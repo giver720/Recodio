@@ -21,6 +21,7 @@ static class Program
             return;
         }
 
+        AppPaths.MigrateFromInstallDir(AppContext.BaseDirectory);
         Application.SetColorMode(ResolveColorMode());
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm(args));
@@ -30,7 +31,11 @@ static class Program
     {
         try
         {
-            var configFile = Path.Combine(AppContext.BaseDirectory, "config.json");
+            var configFile = AppPaths.ConfigFile;
+            // Also check legacy path if migration hasn't run yet for this process path.
+            if (!File.Exists(configFile))
+                configFile = Path.Combine(AppContext.BaseDirectory, "config.json");
+
             if (File.Exists(configFile))
             {
                 var config = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(configFile));

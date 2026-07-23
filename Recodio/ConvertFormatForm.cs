@@ -3,9 +3,11 @@ namespace Recodio;
 public class ConvertFormatForm : Form
 {
     private readonly string _ffmpegPath;
+    private readonly Action<HistoryEntry>? _onHistory;
     private readonly ListBox _lstFiles;
     private readonly ComboBox _cmbFormat;
     private readonly ComboBox _cmbQuality;
+    private readonly ComboBox _cmbOnExists;
     private readonly TextBox _txtDest;
     private readonly CheckBox _chkDeleteOriginal;
     private readonly ProgressBar _progressBar;
@@ -17,14 +19,20 @@ public class ConvertFormatForm : Form
     private CancellationTokenSource? _cts;
     private bool _closeRequested;
 
-    public ConvertFormatForm(string ffmpegPath, IEnumerable<string> initialFiles, string defaultQuality)
+    public ConvertFormatForm(
+        string ffmpegPath,
+        IEnumerable<string> initialFiles,
+        string defaultQuality,
+        string onFileExists = "skip",
+        Action<HistoryEntry>? onHistory = null)
     {
         _ffmpegPath = ffmpegPath;
+        _onHistory = onHistory;
 
         Text = "Convertir a otro formato";
-        Size = new Size(600, 584);
+        Size = new Size(600, 620);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(520, 480);
+        MinimumSize = new Size(520, 500);
         AllowDrop = true;
         DragEnter += (_, e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
         DragDrop += (_, e) =>
@@ -87,13 +95,20 @@ public class ConvertFormatForm : Form
         _cmbQuality.SelectedIndex = defaultQuality switch { "medium" => 1, "low" => 2, _ => 0 };
         Controls.Add(_cmbQuality);
 
-        var lblDest = new Label { Text = "Carpeta de destino (vacio = misma carpeta del original):", Location = new Point(10, 265), AutoSize = true };
+        var lblExists = new Label { Text = "Si ya existe:", Location = new Point(10, 262), AutoSize = true };
+        Controls.Add(lblExists);
+        _cmbOnExists = new ComboBox { Location = new Point(100, 259), Size = new Size(200, 22), DropDownStyle = ComboBoxStyle.DropDownList };
+        _cmbOnExists.Items.AddRange(["Omitir", "Sobrescribir", "Renombrar"]);
+        _cmbOnExists.SelectedIndex = onFileExists switch { "overwrite" => 1, "rename" => 2, _ => 0 };
+        Controls.Add(_cmbOnExists);
+
+        var lblDest = new Label { Text = "Carpeta de destino (vacio = misma carpeta del original):", Location = new Point(10, 290), AutoSize = true };
         Controls.Add(lblDest);
 
-        _txtDest = new TextBox { Location = new Point(10, 283), Size = new Size(500, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _txtDest = new TextBox { Location = new Point(10, 308), Size = new Size(500, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         Controls.Add(_txtDest);
 
-        var btnDest = new Button { Text = "...", Location = new Point(520, 282), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var btnDest = new Button { Text = "...", Location = new Point(520, 307), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         btnDest.Click += (_, _) =>
         {
             using var fbd = new FolderBrowserDialog();
@@ -104,22 +119,22 @@ public class ConvertFormatForm : Form
         _chkDeleteOriginal = new CheckBox
         {
             Text = "Eliminar el archivo original despues de convertir (solo queda la conversion)",
-            Location = new Point(10, 310),
+            Location = new Point(10, 338),
             AutoSize = true,
             Checked = true,
         };
         Controls.Add(_chkDeleteOriginal);
 
-        _progressBar = new ProgressBar { Location = new Point(10, 342), Size = new Size(560, 18), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _progressBar = new ProgressBar { Location = new Point(10, 368), Size = new Size(560, 18), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         Controls.Add(_progressBar);
 
-        _lblProgress = new Label { Text = "", Location = new Point(10, 364), AutoSize = true };
+        _lblProgress = new Label { Text = "", Location = new Point(10, 390), AutoSize = true };
         Controls.Add(_lblProgress);
 
         _txtLog = new TextBox
         {
-            Location = new Point(10, 386),
-            Size = new Size(560, 110),
+            Location = new Point(10, 412),
+            Size = new Size(560, 120),
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
@@ -128,19 +143,16 @@ public class ConvertFormatForm : Form
         };
         Controls.Add(_txtLog);
 
-        _btnConvert = new Button { Text = "Convertir", Location = new Point(405, 504), Size = new Size(85, 28), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnConvert = new Button { Text = "Convertir", Location = new Point(405, 542), Size = new Size(85, 28), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         _btnConvert.Click += async (_, _) => await ConvertAllAsync();
         Controls.Add(_btnConvert);
 
-        _btnCancel = new Button { Text = "Cancelar", Location = new Point(495, 504), Size = new Size(80, 28), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
+        _btnCancel = new Button { Text = "Cancelar", Location = new Point(495, 542), Size = new Size(80, 28), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
         _btnCancel.Click += (_, _) => _cts?.Cancel();
         Controls.Add(_btnCancel);
 
         FormClosing += (_, e) =>
         {
-            // Let a running conversion finish cancelling before the form (and its controls)
-            // actually get disposed, otherwise ConvertAllAsync crashes touching disposed
-            // controls once the in-flight file finishes and it resumes.
             if (_cts == null) return;
             e.Cancel = true;
             _closeRequested = true;
@@ -175,6 +187,7 @@ public class ConvertFormatForm : Form
         var files = _lstFiles.Items.Cast<string>().ToList();
         var formatKey = Formats.All[_cmbFormat.SelectedIndex].Key;
         var quality = _cmbQuality.SelectedIndex switch { 1 => "medium", 2 => "low", _ => "high" };
+        var onExists = _cmbOnExists.SelectedIndex switch { 1 => "overwrite", 2 => "rename", _ => "skip" };
         var destDir = _txtDest.Text.Trim();
 
         _btnConvert.Enabled = false;
@@ -200,7 +213,8 @@ public class ConvertFormatForm : Form
             try
             {
                 var result = await FormatConverter.ConvertAsync(_ffmpegPath, file, destDir, formatKey, quality,
-                    onProgress: pct => SetFileProgress(pct, fileNum, files.Count, fileName));
+                    onProgress: pct => SetFileProgress(pct, fileNum, files.Count, fileName),
+                    onFileExists: onExists);
                 if (result.Skipped)
                 {
                     AppendLog($"   omitido: {result.Log}");
@@ -209,6 +223,17 @@ public class ConvertFormatForm : Form
                 {
                     okCount++;
                     AppendLog($"   OK -> {result.OutputPath}");
+                    long sizeKb = 0;
+                    try { sizeKb = new FileInfo(result.OutputPath).Length / 1024; } catch { /* ignore */ }
+                    _onHistory?.Invoke(new HistoryEntry
+                    {
+                        Name = Path.GetFileName(result.OutputPath),
+                        Path = result.OutputPath,
+                        SizeKB = sizeKb,
+                        Kind = "convert",
+                        Status = "ok",
+                        Detail = file,
+                    });
                     if (_chkDeleteOriginal.Checked)
                     {
                         try { File.Delete(file); AppendLog("   original eliminado"); }
@@ -219,12 +244,28 @@ public class ConvertFormatForm : Form
                 {
                     failCount++;
                     AppendLog($"   ERROR: {Truncate(result.Log, 300)}");
+                    _onHistory?.Invoke(new HistoryEntry
+                    {
+                        Name = fileName,
+                        Path = file,
+                        Kind = "convert",
+                        Status = "fail",
+                        Detail = Truncate(result.Log, 200),
+                    });
                 }
             }
             catch (Exception ex)
             {
                 failCount++;
                 AppendLog($"   EXCEPCION: {ex.Message}");
+                _onHistory?.Invoke(new HistoryEntry
+                {
+                    Name = fileName,
+                    Path = file,
+                    Kind = "convert",
+                    Status = "fail",
+                    Detail = ex.Message,
+                });
             }
         }
 

@@ -8,9 +8,13 @@ public class SettingsForm : Form
     private readonly Button _btnOut;
     private readonly ComboBox _cmbQuality;
     private readonly ComboBox _cmbTheme;
+    private readonly ComboBox _cmbWatchMode;
+    private readonly ComboBox _cmbWatchFormat;
+    private readonly ComboBox _cmbOnExists;
+    private readonly CheckBox _chkClipboard;
 
-    public string WatchDir => _txtWatch.Text;
-    public string OutputDir => _chkSameFolder.Checked ? "" : _txtOut.Text;
+    public string WatchDir => _txtWatch.Text.Trim();
+    public string OutputDir => _chkSameFolder.Checked ? "" : _txtOut.Text.Trim();
     public string Quality => _cmbQuality.SelectedIndex switch
     {
         1 => "medium",
@@ -23,59 +27,105 @@ public class SettingsForm : Form
         2 => "system",
         _ => "dark",
     };
+    public string WatchMode => _cmbWatchMode.SelectedIndex == 1 ? "manual" : "auto";
+    public string WatchConvertFormat => Formats.All[_cmbWatchFormat.SelectedIndex].Key;
+    public string OnFileExists => _cmbOnExists.SelectedIndex switch
+    {
+        1 => "overwrite",
+        2 => "rename",
+        _ => "skip",
+    };
+    public bool ClipboardAutoFill => _chkClipboard.Checked;
 
-    public SettingsForm(AppConfig config)
+    public SettingsForm(AppConfig config, IReadOnlyList<ToolStatus>? tools = null)
     {
         Text = "Configuracion - Recodio";
-        Size = new Size(480, 545);
+        Size = new Size(500, 720);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
 
-        var lblWatch = new Label { Text = "Carpeta que se vigila (descargas de Spotube):", Location = new Point(10, 15), AutoSize = true };
+        var y = 12;
+
+        var lblWatch = new Label { Text = "Carpeta vigilada (p. ej. descargas de Spotube):", Location = new Point(10, y), AutoSize = true };
         Controls.Add(lblWatch);
+        y += 20;
 
-        _txtWatch = new TextBox { Text = config.WatchDir, Location = new Point(10, 35), Size = new Size(360, 20) };
+        _txtWatch = new TextBox { Text = config.WatchDir, Location = new Point(10, y), Size = new Size(380, 20) };
         Controls.Add(_txtWatch);
-
-        var btnWatch = new Button { Text = "...", Location = new Point(380, 34), Size = new Size(40, 22) };
+        var btnWatch = new Button { Text = "...", Location = new Point(400, y - 1), Size = new Size(40, 22) };
         btnWatch.Click += (_, _) =>
         {
-            using var fbd = new FolderBrowserDialog { SelectedPath = _txtWatch.Text };
+            using var fbd = new FolderBrowserDialog { InitialDirectory = _txtWatch.Text };
             if (fbd.ShowDialog() == DialogResult.OK) _txtWatch.Text = fbd.SelectedPath;
         };
         Controls.Add(btnWatch);
+        y += 30;
+
+        var lblWatchMode = new Label { Text = "Modo de la carpeta vigilada:", Location = new Point(10, y), AutoSize = true };
+        Controls.Add(lblWatchMode);
+        y += 18;
+        _cmbWatchMode = new ComboBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(320, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        _cmbWatchMode.Items.AddRange([
+            "Automatico (convertir al detectar archivos nuevos)",
+            "Manual (solo con \"Convertir pendientes\")",
+        ]);
+        _cmbWatchMode.SelectedIndex = config.IsWatchAuto ? 0 : 1;
+        Controls.Add(_cmbWatchMode);
+        y += 32;
+
+        var lblWatchFmt = new Label { Text = "Formato de conversion del watch:", Location = new Point(10, y), AutoSize = true };
+        Controls.Add(lblWatchFmt);
+        y += 18;
+        _cmbWatchFormat = new ComboBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(230, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        foreach (var f in Formats.All) _cmbWatchFormat.Items.Add(f.Label);
+        var fmtIdx = Array.FindIndex(Formats.All, f => f.Key == config.WatchConvertFormat);
+        _cmbWatchFormat.SelectedIndex = fmtIdx >= 0 ? fmtIdx : 0;
+        Controls.Add(_cmbWatchFormat);
+        y += 32;
 
         _chkSameFolder = new CheckBox
         {
-            Text = "Guardar los mp3 en la misma carpeta del original",
-            Location = new Point(10, 70),
+            Text = "Guardar conversiones en la misma carpeta del original",
+            Location = new Point(10, y),
             AutoSize = true,
             Checked = string.IsNullOrEmpty(config.OutputDir),
         };
         Controls.Add(_chkSameFolder);
+        y += 26;
 
-        var lblOut = new Label { Text = "Carpeta de salida:", Location = new Point(10, 100), AutoSize = true };
+        var lblOut = new Label { Text = "Carpeta de salida:", Location = new Point(10, y), AutoSize = true };
         Controls.Add(lblOut);
+        y += 18;
 
         _txtOut = new TextBox
         {
             Text = config.OutputDir,
-            Location = new Point(10, 120),
-            Size = new Size(360, 20),
+            Location = new Point(10, y),
+            Size = new Size(380, 20),
             Enabled = !_chkSameFolder.Checked,
         };
         Controls.Add(_txtOut);
-
-        _btnOut = new Button { Text = "...", Location = new Point(380, 119), Size = new Size(40, 22), Enabled = !_chkSameFolder.Checked };
+        _btnOut = new Button { Text = "...", Location = new Point(400, y - 1), Size = new Size(40, 22), Enabled = !_chkSameFolder.Checked };
         _btnOut.Click += (_, _) =>
         {
             using var fbd = new FolderBrowserDialog();
-            if (!string.IsNullOrEmpty(_txtOut.Text)) fbd.SelectedPath = _txtOut.Text;
+            if (!string.IsNullOrEmpty(_txtOut.Text)) fbd.InitialDirectory = _txtOut.Text;
             if (fbd.ShowDialog() == DialogResult.OK) _txtOut.Text = fbd.SelectedPath;
         };
         Controls.Add(_btnOut);
+        y += 28;
 
         _chkSameFolder.CheckedChanged += (_, _) =>
         {
@@ -83,46 +133,63 @@ public class SettingsForm : Form
             _btnOut.Enabled = !_chkSameFolder.Checked;
         };
 
-        var lblQuality = new Label { Text = "Calidad del mp3:", Location = new Point(10, 155), AutoSize = true };
+        var lblQuality = new Label { Text = "Calidad de audio (mp3/etc.):", Location = new Point(10, y), AutoSize = true };
         Controls.Add(lblQuality);
-
+        y += 18;
         _cmbQuality = new ComboBox
         {
-            Location = new Point(10, 175),
+            Location = new Point(10, y),
             Size = new Size(230, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
         _cmbQuality.Items.AddRange(["Alta (VBR ~245 kbps)", "Media (192 kbps)", "Baja (128 kbps)"]);
         _cmbQuality.SelectedIndex = config.Quality switch { "medium" => 1, "low" => 2, _ => 0 };
         Controls.Add(_cmbQuality);
+        y += 32;
 
-        var lblTheme = new Label { Text = "Tema:", Location = new Point(10, 210), AutoSize = true };
+        var lblExists = new Label { Text = "Si el archivo de destino ya existe:", Location = new Point(10, y), AutoSize = true };
+        Controls.Add(lblExists);
+        y += 18;
+        _cmbOnExists = new ComboBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(280, 22),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        _cmbOnExists.Items.AddRange(["Omitir (no sobrescribir)", "Sobrescribir", "Renombrar (archivo (2))"]);
+        _cmbOnExists.SelectedIndex = config.OnFileExists switch { "overwrite" => 1, "rename" => 2, _ => 0 };
+        Controls.Add(_cmbOnExists);
+        y += 32;
+
+        var lblTheme = new Label { Text = "Tema:", Location = new Point(10, y), AutoSize = true };
         Controls.Add(lblTheme);
-
+        y += 18;
         _cmbTheme = new ComboBox
         {
-            Location = new Point(10, 228),
+            Location = new Point(10, y),
             Size = new Size(230, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
         _cmbTheme.Items.AddRange(["Oscuro", "Claro", "Seguir el sistema"]);
         _cmbTheme.SelectedIndex = config.Theme switch { "light" => 1, "system" => 2, _ => 0 };
         Controls.Add(_cmbTheme);
+        y += 28;
 
-        var lblRestart = new Label
+        _chkClipboard = new CheckBox
         {
-            Text = "El tema se aplica al reiniciar la aplicacion.",
-            Location = new Point(10, 258),
+            Text = "Autocompletar URL desde el portapapeles al abrir descargas",
+            Location = new Point(10, y),
             AutoSize = true,
-            ForeColor = SystemColors.GrayText,
+            Checked = config.ClipboardAutoFill,
         };
-        Controls.Add(lblRestart);
+        Controls.Add(_chkClipboard);
+        y += 28;
 
         var chkContextMenu = new CheckBox
         {
             Text = "Agregar \"Convertir con Recodio\" al menu contextual de Windows",
-            Location = new Point(10, 285),
-            Size = new Size(450, 36),
+            Location = new Point(10, y),
+            Size = new Size(460, 36),
             Checked = WindowsContextMenu.IsRegistered(),
         };
         chkContextMenu.CheckedChanged += (_, _) =>
@@ -131,15 +198,58 @@ public class SettingsForm : Form
             else WindowsContextMenu.Unregister();
         };
         Controls.Add(chkContextMenu);
+        y += 42;
+
+        // Dependency status
+        var lblDeps = new Label
+        {
+            Text = "Dependencias:",
+            Location = new Point(10, y),
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+        };
+        Controls.Add(lblDeps);
+        y += 20;
+
+        if (tools != null)
+        {
+            foreach (var t in tools)
+            {
+                var line = new Label
+                {
+                    Text = t.Found ? $"✓ {t.Name}: {t.PathOrHint}" : $"✗ {t.Name}: {t.PathOrHint}",
+                    Location = new Point(10, y),
+                    Size = new Size(460, 18),
+                    ForeColor = t.Found ? SystemColors.ControlText : Color.IndianRed,
+                    AutoEllipsis = true,
+                };
+                Controls.Add(line);
+                y += 18;
+            }
+        }
+        y += 8;
+
+        var lblPaths = new Label
+        {
+            Text = $"Config: {AppPaths.ConfigFile}",
+            Location = new Point(10, y),
+            Size = new Size(460, 32),
+            ForeColor = SystemColors.GrayText,
+            AutoEllipsis = true,
+        };
+        Controls.Add(lblPaths);
+        y += 36;
 
         var btnCheckUpdates = new Button
         {
-            Text = "Buscar actualizaciones de yt-dlp / ffmpeg",
-            Location = new Point(10, 328),
-            Size = new Size(280, 26),
+            Text = "Buscar actualizaciones de yt-dlp / ffmpeg (winget)",
+            Location = new Point(10, y),
+            Size = new Size(320, 26),
         };
-        var lblUpdateResult = new Label { Text = "", Location = new Point(10, 360), Size = new Size(450, 34), AutoSize = false };
+        y += 30;
+        var lblUpdateResult = new Label { Text = "", Location = new Point(10, y), Size = new Size(460, 28), AutoSize = false };
         Controls.Add(lblUpdateResult);
+        y += 30;
 
         btnCheckUpdates.Click += async (_, _) =>
         {
@@ -167,17 +277,19 @@ public class SettingsForm : Form
         var btnCheckAppUpdate = new Button
         {
             Text = "Buscar actualizacion de Recodio",
-            Location = new Point(10, 400),
+            Location = new Point(10, y),
             Size = new Size(280, 26),
         };
+        y += 30;
         var lblAppUpdateResult = new Label
         {
             Text = $"Version instalada: {AppSelfUpdater.CurrentVersion}",
-            Location = new Point(10, 432),
-            Size = new Size(450, 34),
+            Location = new Point(10, y),
+            Size = new Size(460, 28),
             AutoSize = false,
         };
         Controls.Add(lblAppUpdateResult);
+        y += 36;
 
         btnCheckAppUpdate.Click += async (_, _) =>
         {
@@ -203,7 +315,6 @@ public class SettingsForm : Form
 
                 lblAppUpdateResult.Text = "Descargando actualizacion...";
                 await AppSelfUpdater.DownloadAndApplyAsync(update);
-                // DownloadAndApplyAsync ends the process on success - nothing after this runs.
             }
             catch (Exception ex)
             {
@@ -217,14 +328,17 @@ public class SettingsForm : Form
         };
         Controls.Add(btnCheckAppUpdate);
 
-        var btnSave = new Button { Text = "Guardar", Location = new Point(255, 475), DialogResult = DialogResult.OK };
+        var btnSave = new Button { Text = "Guardar", Location = new Point(275, y), DialogResult = DialogResult.OK };
         Controls.Add(btnSave);
 
-        var btnCancel = new Button { Text = "Cancelar", Location = new Point(340, 475), DialogResult = DialogResult.Cancel };
+        var btnCancel = new Button { Text = "Cancelar", Location = new Point(360, y), DialogResult = DialogResult.Cancel };
         Controls.Add(btnCancel);
 
         AcceptButton = btnSave;
         CancelButton = btnCancel;
+
+        // Ensure dialog is tall enough for content
+        ClientSize = new Size(480, y + 50);
     }
 
     private static async Task<string> CheckWingetUpgrade(string packageId)
