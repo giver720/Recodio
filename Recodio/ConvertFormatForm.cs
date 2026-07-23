@@ -200,84 +200,95 @@ public class ConvertFormatForm : Form
         var okCount = 0;
         var failCount = 0;
 
-        for (var i = 0; i < files.Count; i++)
+        try
         {
-            if (_cts.IsCancellationRequested) break;
-            var file = files[i];
-            var fileNum = i + 1;
-            var fileName = Path.GetFileName(file);
-            _progressBar.Value = 0;
-            _lblProgress.Text = $"Archivo {fileNum} de {files.Count}: {fileName}";
-            AppendLog($">> {fileName}");
-
-            try
+            for (var i = 0; i < files.Count; i++)
             {
-                var result = await FormatConverter.ConvertAsync(_ffmpegPath, file, destDir, formatKey, quality,
-                    onProgress: pct => SetFileProgress(pct, fileNum, files.Count, fileName),
-                    onFileExists: onExists);
-                if (result.Skipped)
+                if (_cts.IsCancellationRequested) break;
+                var file = files[i];
+                var fileNum = i + 1;
+                var fileName = Path.GetFileName(file);
+                _progressBar.Value = 0;
+                _lblProgress.Text = $"Archivo {fileNum} de {files.Count}: {fileName}";
+                AppendLog($">> {fileName}");
+
+                try
                 {
-                    AppendLog($"   omitido: {result.Log}");
-                }
-                else if (result.Success)
-                {
-                    okCount++;
-                    AppendLog($"   OK -> {result.OutputPath}");
-                    long sizeKb = 0;
-                    try { sizeKb = new FileInfo(result.OutputPath).Length / 1024; } catch { /* ignore */ }
-                    _onHistory?.Invoke(new HistoryEntry
+                    var result = await FormatConverter.ConvertAsync(_ffmpegPath, file, destDir, formatKey, quality,
+                        onProgress: pct => SetFileProgress(pct, fileNum, files.Count, fileName),
+                        onFileExists: onExists,
+                        ct: _cts.Token);
+                    if (result.Skipped)
                     {
-                        Name = Path.GetFileName(result.OutputPath),
-                        Path = result.OutputPath,
-                        SizeKB = sizeKb,
-                        Kind = "convert",
-                        Status = "ok",
-                        Detail = file,
-                    });
-                    if (_chkDeleteOriginal.Checked)
+                        AppendLog($"   omitido: {result.Log}");
+                    }
+                    else if (result.Success)
                     {
-                        try { File.Delete(file); AppendLog("   original eliminado"); }
-                        catch (Exception ex) { AppendLog($"   no se pudo eliminar el original: {ex.Message}"); }
+                        okCount++;
+                        AppendLog($"   OK -> {result.OutputPath}");
+                        long sizeKb = 0;
+                        try { sizeKb = new FileInfo(result.OutputPath).Length / 1024; } catch { /* ignore */ }
+                        _onHistory?.Invoke(new HistoryEntry
+                        {
+                            Name = Path.GetFileName(result.OutputPath),
+                            Path = result.OutputPath,
+                            SizeKB = sizeKb,
+                            Kind = "convert",
+                            Status = "ok",
+                            Detail = file,
+                        });
+                        if (_chkDeleteOriginal.Checked)
+                        {
+                            try { File.Delete(file); AppendLog("   original eliminado"); }
+                            catch (Exception ex) { AppendLog($"   no se pudo eliminar el original: {ex.Message}"); }
+                        }
+                    }
+                    else
+                    {
+                        failCount++;
+                        AppendLog($"   ERROR: {Truncate(result.Log, 300)}");
+                        _onHistory?.Invoke(new HistoryEntry
+                        {
+                            Name = fileName,
+                            Path = file,
+                            Kind = "convert",
+                            Status = "fail",
+                            Detail = Truncate(result.Log, 200),
+                        });
                     }
                 }
-                else
+                catch (OperationCanceledException)
+                {
+                    AppendLog("   cancelado.");
+                    break;
+                }
+                catch (Exception ex)
                 {
                     failCount++;
-                    AppendLog($"   ERROR: {Truncate(result.Log, 300)}");
+                    AppendLog($"   EXCEPCION: {ex.Message}");
                     _onHistory?.Invoke(new HistoryEntry
                     {
                         Name = fileName,
                         Path = file,
                         Kind = "convert",
                         Status = "fail",
-                        Detail = Truncate(result.Log, 200),
+                        Detail = ex.Message,
                     });
                 }
             }
-            catch (Exception ex)
-            {
-                failCount++;
-                AppendLog($"   EXCEPCION: {ex.Message}");
-                _onHistory?.Invoke(new HistoryEntry
-                {
-                    Name = fileName,
-                    Path = file,
-                    Kind = "convert",
-                    Status = "fail",
-                    Detail = ex.Message,
-                });
-            }
         }
+        finally
+        {
+            _lblProgress.Text = _cts?.IsCancellationRequested == true
+                ? "Cancelado."
+                : $"Listo: {okCount} convertidos, {failCount} con error.";
 
-        _lblProgress.Text = _cts.IsCancellationRequested
-            ? "Cancelado."
-            : $"Listo: {okCount} convertidos, {failCount} con error.";
-
-        _btnConvert.Enabled = true;
-        _btnCancel.Enabled = false;
-        _cts.Dispose();
-        _cts = null;
-        CloseIfPending();
+            _btnConvert.Enabled = true;
+            _btnCancel.Enabled = false;
+            _cts?.Dispose();
+            _cts = null;
+            CloseIfPending();
+        }
     }
 
     private void SetFileProgress(int percent, int fileNum, int totalFiles, string fileName)

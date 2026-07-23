@@ -289,19 +289,15 @@ public class DownloadForm : Form
             return;
         }
 
-        // Spotify is the other pipeline — don't confuse the user.
-        if (ClipboardHelper.TryGetUrl("open.spotify.com", "spotify.com", "spotify.link") != null
-            || url.Contains("spotify.com", StringComparison.OrdinalIgnoreCase))
+        // Spotify is the other pipeline — only look at the textbox URL, not the clipboard.
+        if (url.Contains("spotify.com", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("spotify.link", StringComparison.OrdinalIgnoreCase))
         {
-            // Only warn if this exact box has a spotify link
-            if (url.Contains("spotify", StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show(this,
-                    "Las URLs de Spotify se descargan con spotDL (boton \"Descargar con spotDL...\").\n\n" +
-                    "yt-dlp aca es para video/audio de otros sitios.",
-                    "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
+            MessageBox.Show(this,
+                "Las URLs de Spotify se descargan con spotDL (boton \"Descargar con spotDL...\").\n\n" +
+                "yt-dlp aca es para video/audio de otros sitios.",
+                "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
         }
 
         _btnAnalyze.Enabled = false;
@@ -312,7 +308,9 @@ public class DownloadForm : Form
         _analyzeCts = new CancellationTokenSource();
         try
         {
-            var result = await YtDlpDownloader.AnalyzeAsync(_ytDlpPath, url, _analyzeCts.Token);
+            // Pass the same cookie choice used for download — Instagram/X often need it to list items.
+            var result = await YtDlpDownloader.AnalyzeAsync(
+                _ytDlpPath, url, _analyzeCts.Token, SelectedCookiesBrowser());
             _entries = result.Entries;
             _detectedExtractor = result.Extractor;
             foreach (var e in _entries)
@@ -463,7 +461,13 @@ public class DownloadForm : Form
 
     private void AppendLog(string line)
     {
-        if (InvokeRequired) { Invoke(() => AppendLog(line)); return; }
-        _txtLog.AppendText(line + Environment.NewLine);
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(() => AppendLog(line)); return; }
+            if (_txtLog.IsDisposed) return;
+            _txtLog.AppendText(line + Environment.NewLine);
+        }
+        catch (ObjectDisposedException) { /* form closed mid-download */ }
     }
 }

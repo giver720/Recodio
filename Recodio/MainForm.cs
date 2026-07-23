@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -265,7 +266,12 @@ public class MainForm : Form
     private void ExitApp()
     {
         _reallyExit = true;
-        _trayIcon.Visible = false;
+        try
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+        }
+        catch { /* ignore */ }
         _ipcCts.Cancel();
         TeardownWatcher();
         Close();
@@ -481,28 +487,26 @@ public class MainForm : Form
     {
         if (string.IsNullOrWhiteSpace(path)) return;
         var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (FormatConverter.SkipExtensions.Contains(ext)) return;
-        // Only convert TO the watch format from non-matching extensions; skip already-converted
-        // and temp/partial downloads.
+        if (FormatConverter.TempExtensions.Contains(ext)) return;
+        // Only convert real media; skip already-converted target format.
+        if (!FormatConverter.ConvertibleExtensions.Contains(ext)) return;
         var targetExt = Formats.Get(_config.WatchConvertFormat).Extension;
         if (string.Equals(ext, targetExt, StringComparison.OrdinalIgnoreCase)) return;
 
         lock (_pendingLock) _pendingWatchFiles.Add(path);
         if (_debounceTimer == null) return;
-        // Restart debounce window on each event.
-        if (InvokeRequired)
+        // Restart debounce window on each event (null-safe: teardown can race).
+        void Bump()
         {
-            BeginInvoke(() =>
+            try
             {
-                _debounceTimer.Stop();
-                _debounceTimer.Start();
-            });
+                _debounceTimer?.Stop();
+                _debounceTimer?.Start();
+            }
+            catch (ObjectDisposedException) { /* watcher torn down */ }
         }
-        else
-        {
-            _debounceTimer.Stop();
-            _debounceTimer.Start();
-        }
+        if (InvokeRequired) BeginInvoke(Bump);
+        else Bump();
     }
 
     private async Task ProcessPendingWatchFilesAsync()
@@ -624,7 +628,12 @@ public class MainForm : Form
 
     private void AppendActivity(string line)
     {
-        _txtActivity.AppendText(line + Environment.NewLine);
+        try
+        {
+            if (_txtActivity is { IsDisposed: false })
+                _txtActivity.AppendText(line + Environment.NewLine);
+        }
+        catch (ObjectDisposedException) { /* shutting down */ }
     }
 
     private void UpdateStatus()
@@ -659,7 +668,8 @@ public class MainForm : Form
         if (_updatingTools) return;
         if (auto)
         {
-            if (DateTime.TryParse(_config.LastToolsUpdateCheck, out var last)
+            if (DateTime.TryParse(_config.LastToolsUpdateCheck, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out var last)
                 && (DateTime.Now - last) < TimeSpan.FromHours(24))
                 return;
         }
@@ -723,10 +733,10 @@ public class MainForm : Form
                 .Where(f =>
                 {
                     var ext = Path.GetExtension(f).ToLowerInvariant();
-                    if (FormatConverter.SkipExtensions.Contains(ext)) return false;
+                    if (FormatConverter.TempExtensions.Contains(ext)) return false;
                     if (string.Equals(ext, targetExt, StringComparison.OrdinalIgnoreCase)) return false;
-                    return FormatConverter.ConvertibleExtensions.Contains(ext)
-                        || !string.IsNullOrEmpty(ext); // still try unknown media Spotube may drop
+                    // Only real media — never try .txt/.json/etc.
+                    return FormatConverter.ConvertibleExtensions.Contains(ext);
                 });
             var any = false;
             foreach (var file in files)
@@ -766,7 +776,8 @@ public class MainForm : Form
             if (result.Success)
             {
                 Log($"OK -> {result.OutputPath}");
-                var sizeKB = new FileInfo(result.OutputPath).Length / 1024;
+                long sizeKB = 0;
+                try { sizeKB = new FileInfo(result.OutputPath).Length / 1024; } catch { /* gone */ }
                 RecordHistory(new HistoryEntry
                 {
                     Name = Path.GetFileName(result.OutputPath),

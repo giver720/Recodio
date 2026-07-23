@@ -9,9 +9,14 @@ public static class WindowsContextMenu
 
     public static bool IsRegistered()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(
-            $@"Software\Classes\SystemFileAssociations\{FormatConverter.ConvertibleExtensions[0]}\shell\{VerbName}", false);
-        return key != null;
+        // True only if every convertible extension has the verb (partial installs look "off").
+        foreach (var ext in FormatConverter.ConvertibleExtensions)
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(
+                $@"Software\Classes\SystemFileAssociations\{ext}\shell\{VerbName}", false);
+            if (key == null) return false;
+        }
+        return FormatConverter.ConvertibleExtensions.Length > 0;
     }
 
     public static void Register()

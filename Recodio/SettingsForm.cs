@@ -242,7 +242,7 @@ public class SettingsForm : Form
 
         var btnCheckUpdates = new Button
         {
-            Text = "Buscar actualizaciones de yt-dlp / ffmpeg (winget)",
+            Text = "Estado winget de yt-dlp / ffmpeg",
             Location = new Point(10, y),
             Size = new Size(320, 26),
         };
@@ -341,6 +341,9 @@ public class SettingsForm : Form
         ClientSize = new Size(480, y + 50);
     }
 
+    // Read-only check: do NOT run `winget upgrade` here (that installs). List the package and
+    // report whether winget knows about it; the main "Actualizar descargadores" button uses
+    // yt-dlp -U / pip for real updates.
     private static async Task<string> CheckWingetUpgrade(string packageId)
     {
         var psi = new System.Diagnostics.ProcessStartInfo
@@ -351,7 +354,7 @@ public class SettingsForm : Form
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        foreach (var a in new[] { "upgrade", "--id", packageId, "-e", "--accept-package-agreements", "--accept-source-agreements", "--silent" })
+        foreach (var a in new[] { "list", "--id", packageId, "-e", "--accept-source-agreements", "--disable-interactivity" })
             psi.ArgumentList.Add(a);
 
         try
@@ -360,13 +363,13 @@ public class SettingsForm : Form
             var stdout = await proc.StandardOutput.ReadToEndAsync();
             await proc.WaitForExitAsync();
 
-            if (stdout.Contains("No available upgrade found", StringComparison.OrdinalIgnoreCase))
-                return "ya esta actualizado";
-            if (stdout.Contains("No installed package found", StringComparison.OrdinalIgnoreCase))
-                return "no instalado";
-            if (stdout.Contains("Successfully installed", StringComparison.OrdinalIgnoreCase))
-                return "actualizado correctamente";
-            return $"revisa manualmente (winget upgrade --id {packageId})";
+            if (stdout.Contains("No installed package found", StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(stdout)
+                || !stdout.Contains(packageId, StringComparison.OrdinalIgnoreCase))
+                return "no instalado via winget";
+
+            // winget list table includes name + version when installed.
+            return "instalado (usa 'Actualizar descargadores' en la ventana principal para actualizar)";
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception)
         {

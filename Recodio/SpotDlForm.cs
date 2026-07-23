@@ -682,7 +682,7 @@ public class SpotDlForm : Form
             AppendLog($">> ERROR: {ex.Message}");
             _onHistory?.Invoke(new HistoryEntry
             {
-                Name = jobs.FirstOrDefault().Label ?? "spotDL",
+                Name = jobs.Count > 0 ? (jobs[0].Label ?? "spotDL") : "spotDL",
                 Path = destDir,
                 Kind = "spotdl",
                 Status = "fail",
@@ -711,7 +711,13 @@ public class SpotDlForm : Form
 
     private void AppendLog(string line)
     {
-        if (InvokeRequired) { Invoke(() => AppendLog(line)); return; }
-        _txtLog.AppendText(line + Environment.NewLine);
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(() => AppendLog(line)); return; }
+            if (_txtLog.IsDisposed) return;
+            _txtLog.AppendText(line + Environment.NewLine);
+        }
+        catch (ObjectDisposedException) { /* form closed mid-download */ }
     }
 }

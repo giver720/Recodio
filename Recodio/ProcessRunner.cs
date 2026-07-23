@@ -72,6 +72,9 @@ public static class ProcessRunner
 
         await WaitForExitAsync(proc, ct);
 
+        // Give async stdout/stderr handlers a brief moment to flush final lines.
+        try { await Task.Delay(50, CancellationToken.None); } catch { /* ignore */ }
+
         if (proc.ExitCode != 0)
         {
             var message = nonZeroExitMessage(proc.ExitCode);

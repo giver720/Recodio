@@ -31,8 +31,13 @@ public static class Formats
 
 public static class FormatConverter
 {
-    public static readonly string[] SkipExtensions =
-        [".mp3", ".part", ".tmp", ".ytdl", ".crdownload", ".ffmpeg"];
+    // Incomplete / temp downloads — never convert these.
+    public static readonly string[] TempExtensions =
+        [".part", ".tmp", ".ytdl", ".crdownload", ".ffmpeg", ".download"];
+
+    // Legacy alias: previously always skipped .mp3 (wrong when watch target is e.g. flac).
+    // Prefer TempExtensions + target-extension checks at the call site.
+    public static readonly string[] SkipExtensions = TempExtensions;
 
     // Extensions the Windows context menu / manual picker offers to convert FROM.
     public static readonly string[] ConvertibleExtensions =
@@ -66,15 +71,21 @@ public static class FormatConverter
     // onFileExists: skip | overwrite | rename
     public static async Task<ConversionResult> ConvertAsync(
         string ffmpegPath, string inputPath, string outputDir, string formatKey, string quality,
-        Action<int>? onProgress = null, string onFileExists = "skip")
+        Action<int>? onProgress = null, string onFileExists = "skip",
+        CancellationToken ct = default)
     {
-        var (ready, notReadyReason) = await WaitUntilReadyAsync(inputPath);
+        ct.ThrowIfCancellationRequested();
+        var (ready, notReadyReason) = await WaitUntilReadyAsync(inputPath, ct);
         if (!ready)
             return new ConversionResult(false, true, "", notReadyReason ?? "archivo no disponible para convertir");
 
         var spec = Formats.Get(formatKey);
         var baseName = Path.GetFileNameWithoutExtension(inputPath) + spec.Extension;
-        var destDir = string.IsNullOrWhiteSpace(outputDir) ? Path.GetDirectoryName(inputPath)! : outputDir;
+        var destDir = string.IsNullOrWhiteSpace(outputDir)
+            ? (Path.GetDirectoryName(inputPath) ?? Environment.CurrentDirectory)
+            : outputDir;
+        if (string.IsNullOrWhiteSpace(destDir))
+            destDir = Environment.CurrentDirectory;
         Directory.CreateDirectory(destDir);
         var outPath = Path.Combine(destDir, baseName);
 
@@ -128,10 +139,29 @@ public static class FormatConverter
             onProgress((int)Math.Clamp(elapsed / durationSeconds * 100, 0, 100));
         };
 
-        proc.Start();
+        try
+        {
+            proc.Start();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            return new ConversionResult(false, false, "",
+                $"No se encontro ffmpeg ({ffmpegPath}): {ex.Message}");
+        }
+
         proc.BeginErrorReadLine();
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        await proc.WaitForExitAsync();
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        try
+        {
+            await ProcessRunner.WaitForExitAsync(proc, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!proc.HasExited) proc.Kill(true); } catch { /* already gone */ }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { /* partial */ }
+            throw;
+        }
+
         var stdout = await stdoutTask;
         if (!string.IsNullOrEmpty(stdout)) logBuilder.Insert(0, stdout + Environment.NewLine);
 
@@ -222,20 +252,22 @@ public static class FormatConverter
         _ => [],
     };
 
-    private static async Task<(bool Ready, string? Reason)> WaitUntilReadyAsync(string path)
+    private static async Task<(bool Ready, string? Reason)> WaitUntilReadyAsync(string path, CancellationToken ct = default)
     {
         long prevSize = -1;
         for (var i = 0; i < 30; i++)
         {
+            ct.ThrowIfCancellationRequested();
             if (!File.Exists(path)) return (false, "archivo desaparecio antes de convertir");
             var size = new FileInfo(path).Length;
             if (size == prevSize && size > 0) break;
             prevSize = size;
-            await Task.Delay(1000);
+            await Task.Delay(1000, ct);
         }
 
         for (var i = 0; i < 10; i++)
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
                 using var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None);
@@ -243,7 +275,7 @@ public static class FormatConverter
             }
             catch (IOException)
             {
-                await Task.Delay(1000);
+                await Task.Delay(1000, ct);
             }
         }
         // Never got an exclusive lock (another process, e.g. a still-running download, keeps

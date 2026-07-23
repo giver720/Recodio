@@ -19,7 +19,7 @@ public static class AppSelfUpdater
 
     public static async Task<UpdateInfo?> CheckLatestAsync(CancellationToken ct = default)
     {
-        using var http = new HttpClient();
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("Recodio-App-Updater");
         var json = await http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases/latest", ct);
 
@@ -75,7 +75,7 @@ public static class AppSelfUpdater
         Directory.CreateDirectory(tempRoot);
 
         var zipPath = Path.Combine(tempRoot, "update.zip");
-        using (var http = new HttpClient())
+        using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) })
         {
             http.DefaultRequestHeaders.UserAgent.ParseAdd("Recodio-App-Updater");
             using var response = await http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -87,15 +87,28 @@ public static class AppSelfUpdater
         var extractDir = Path.Combine(tempRoot, "extracted");
         ZipFile.ExtractToDirectory(zipPath, extractDir, overwriteFiles: true);
 
+        // Some zips nest a single top-level folder; copy from that folder if so.
+        var copyFrom = extractDir;
+        try
+        {
+            var top = Directory.GetFileSystemEntries(extractDir);
+            if (top.Length == 1 && Directory.Exists(top[0])
+                && File.Exists(Path.Combine(top[0], "Recodio.exe")))
+                copyFrom = top[0];
+        }
+        catch { /* use extractDir */ }
+
+        // Escape for PowerShell single-quoted strings (double any embedded ').
+        static string Ps(string s) => s.Replace("'", "''");
         var scriptPath = Path.Combine(tempRoot, "apply_update.ps1");
         var script = $$"""
             $ErrorActionPreference = 'SilentlyContinue'
             $targetPid = {{Environment.ProcessId}}
             try { Wait-Process -Id $targetPid -Timeout 30 } catch {}
             Start-Sleep -Milliseconds 500
-            Copy-Item -Path "{{extractDir}}\*" -Destination "{{installDir}}" -Recurse -Force
-            Start-Process -FilePath "{{exePath}}"
-            Remove-Item -Path "{{tempRoot}}" -Recurse -Force
+            Copy-Item -Path '{{Ps(copyFrom)}}\*' -Destination '{{Ps(installDir)}}' -Recurse -Force
+            Start-Process -FilePath '{{Ps(exePath)}}'
+            Remove-Item -Path '{{Ps(tempRoot)}}' -Recurse -Force
             """;
         await File.WriteAllTextAsync(scriptPath, script, ct);
 

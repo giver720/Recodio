@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.0**
+**Versión actual: 1.3.1**
 
 ## Requisitos
 
@@ -85,6 +85,13 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.1
+- Fixes: selección de 1 ítem en playlist yt-dlp, archive/ids sintéticos, cancelar conversión mata ffmpeg
+- Watch: no saltea `.mp3` si el destino es otro formato; solo convierte media real
+- spotDL: no reporta éxito si falló sin URLs de error; permanent-errors más precisos
+- Settings: winget solo consulta estado (no instala); updater con timeout y ZIP anidado
+- Estabilidad UI: logs/tray/debounce sin crash al cerrar
 
 ### 1.3.0
 - spotDL: preview/Analizar, proveedores con fallback, cookies, reintentos por track

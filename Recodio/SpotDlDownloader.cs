@@ -243,10 +243,6 @@ public static class SpotDlDownloader
                         onLine, onProgress, permanent, ct, errorsPath);
 
                     var failedUrls = ReadFailedUrls(errorsPath);
-                    foreach (var u in failedUrls)
-                    {
-                        // Keep for phase B; don't mark permanent yet.
-                    }
 
                     if (failCount == 0 && failedUrls.Count == 0)
                     {
@@ -259,12 +255,14 @@ public static class SpotDlDownloader
                     {
                         knownTracks = failedUrls;
                         onLine($">> {failedUrls.Count} cancion(es) con error; se reintentaran individualmente.");
-                        // continue loop / fall into phase B via knownTracks
                         if (pass >= MaxBatchPasses) break;
                         continue;
                     }
 
+                    // Failures reported only via log lines (no per-URL list) — keep retrying the
+                    // whole query; don't claim success with a non-zero failCount.
                     if (failCount == 0) return 0;
+                    onLine($">> {failCount} error(es) sin URL individual; reintentando query...");
                 }
                 finally
                 {
@@ -275,7 +273,12 @@ public static class SpotDlDownloader
 
         // ----- Phase B: one-by-one for remaining track URLs -----
         if (knownTracks == null || knownTracks.Count == 0)
-            return 0;
+        {
+            // Playlist query with no per-track URLs: we can't surgically retry. Report last
+            // soft-error estimate as at least 1 if we never got a clean pass.
+            onLine(">> No hay URLs individuales para reintentar; revisa el log.");
+            return 1;
+        }
 
         var stillMissing = GetMissingUrls(knownTracks, archivePath, permanent);
         if (stillMissing.Count == 0) return permanent.Count;
@@ -515,14 +518,15 @@ public static class SpotDlDownloader
 
     private static bool IsPermanentError(string line)
     {
+        // Avoid broad matches like "not found" that also hit transient HTTP errors.
         ReadOnlySpan<string> markers =
         [
             "LookupError",
             "No results found",
             "Could not find a match",
-            "not found",
             "Track no longer exists",
             "Invalid URL",
+            "SongError",
         ];
         foreach (var m in markers)
         {
