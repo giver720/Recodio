@@ -39,6 +39,11 @@ public class SettingsForm : Form
     public bool ClipboardAutoFill => _chkClipboard.Checked;
     public string CookiesBrowser => BrowserCookies.KeyAt(_cmbCookies.SelectedIndex);
 
+    /// <summary>Optional gate for app self-update (e.g. block while downloads run).</summary>
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Func<bool>? CanApplyAppUpdate { get; set; }
+
     public SettingsForm(AppConfig config, IReadOnlyList<ToolStatus>? tools = null)
     {
         Text = "Configuracion - Recodio";
@@ -368,6 +373,9 @@ public class SettingsForm : Form
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question);
                 if (confirm != DialogResult.Yes) return;
+
+                if (CanApplyAppUpdate != null && !CanApplyAppUpdate())
+                    return;
 
                 lblAppUpdateResult.Text = "Descargando actualizacion...";
                 await AppSelfUpdater.DownloadAndApplyAsync(update);

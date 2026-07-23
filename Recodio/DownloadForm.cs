@@ -214,15 +214,31 @@ public class DownloadForm : Form
         _btnClose.Click += (_, _) => Close();
         Controls.Add(_btnClose);
 
+        _txtUrl.TextChanged += (_, _) => WarnIfUrlDrifted();
+
         FormClosing += (_, e) =>
         {
-            if (_cts == null && _analyzeCts == null)
+            if (!IsBusy)
             {
                 _progress.StopTimer();
                 return;
             }
+            if (!_closeRequested)
+            {
+                var r = MessageBox.Show(this,
+                    "Hay un analisis o descarga en curso.\n\n¿Cancelar la operacion y cerrar?",
+                    "Recodio", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
             e.Cancel = true;
             _closeRequested = true;
+            _btnCancel.Enabled = false;
+            _btnClose.Enabled = false;
+            _progress.SetStatus("Cancelando...");
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
@@ -244,6 +260,40 @@ public class DownloadForm : Form
         };
 
         UpdateQualityEnabled();
+    }
+
+    public bool IsBusy => _cts != null || _analyzeCts != null;
+
+    /// <summary>Apply settings changed from the main Config dialog while this form stays open.</summary>
+    public void ApplyExternalSettings(string destDir, string cookiesBrowser, bool clipboardAutoFill)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => ApplyExternalSettings(destDir, cookiesBrowser, clipboardAutoFill)); return; }
+        if (!string.IsNullOrWhiteSpace(destDir) && !IsBusy)
+            _txtDest.Text = destDir;
+        else if (!string.IsNullOrWhiteSpace(destDir) && IsBusy
+                 && !string.Equals(_txtDest.Text.Trim(), destDir.Trim(), StringComparison.OrdinalIgnoreCase))
+            _progress.SetStatus("Destino en Config cambio; se usara al terminar la descarga actual.");
+
+        var idx = BrowserCookies.IndexOfKey(cookiesBrowser);
+        if (idx >= 0 && idx < _cmbCookies.Items.Count && !IsBusy)
+            _cmbCookies.SelectedIndex = idx;
+    }
+
+    private void WarnIfUrlDrifted()
+    {
+        if (string.IsNullOrEmpty(_analyzedUrl)) return;
+        var current = _txtUrl.Text.Trim();
+        if (string.IsNullOrEmpty(current)) return;
+        if (!string.Equals(current, _analyzedUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            _lblInfo.Text = "La URL cambio respecto al analisis. Presiona Analizar de nuevo antes de descargar.";
+            _lblInfo.ForeColor = Color.DarkOrange;
+        }
+        else if (_entries.Count > 0)
+        {
+            _lblInfo.ForeColor = SystemColors.ControlText;
+        }
     }
 
     private void UpdateQualityEnabled()
@@ -316,6 +366,7 @@ public class DownloadForm : Form
             _detectedExtractor = result.Extractor;
             _playlistTitle = result.IsPlaylist ? result.PlaylistTitle : null;
             _analyzedUrl = url;
+            _lblInfo.ForeColor = SystemColors.ControlText;
             foreach (var e in _entries)
             {
                 var label = string.IsNullOrEmpty(e.Extractor)

@@ -48,7 +48,20 @@ public static class YtDlpDownloader
     private static readonly Regex ExtractorIdRegex = new(
         @"\[([A-Za-z0-9_-]+)\]\s+([A-Za-z0-9_.%-]{2,})\s*:", RegexOptions.Compiled);
 
-    public static string ArchivePathFor(string destDir) => Path.Combine(destDir, ArchiveFileName);
+    /// <summary>
+    /// Archive lives next to the media: inside the playlist subfolder when organized,
+    /// otherwise in destDir. Avoids mixing ids from different playlists in one file.
+    /// </summary>
+    public static string ArchivePathFor(string destDir, string? playlistFolder = null)
+    {
+        if (!string.IsNullOrWhiteSpace(playlistFolder))
+        {
+            var folder = Path.Combine(destDir, playlistFolder);
+            Directory.CreateDirectory(folder);
+            return Path.Combine(folder, ArchiveFileName);
+        }
+        return Path.Combine(destDir, ArchiveFileName);
+    }
 
     public static bool IsYoutubeExtractor(string? extractor) =>
         !string.IsNullOrEmpty(extractor)
@@ -76,7 +89,7 @@ public static class YtDlpDownloader
         }
         catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookies.Enabled)
         {
-            CookieManager.MarkBrowserBroken(ex.Message);
+            CookieManager.NoteCookieFailure(ex.Message);
             // Retry without cookies so public playlists still work.
             return await AnalyzeOnceAsync(ytDlpPath, url, CookieArgs.None, ct);
         }
@@ -286,7 +299,6 @@ public static class YtDlpDownloader
         string? playlistTitle = null)
     {
         Directory.CreateDirectory(destDir);
-        var archivePath = ArchivePathFor(destDir);
         var entries = selectedEntries is { Count: > 0 }
             ? selectedEntries.Select(NormalizeEntry).ToList()
             : [new PlaylistEntry(1, url, "url:" + url, url, "")];
@@ -298,7 +310,12 @@ public static class YtDlpDownloader
         int batchIndex = 0;
         int batchTotal = 0;
         var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Only mark permanent when the error id belongs to this selection.
+        var selectionIds = new HashSet<string>(
+            entries.SelectMany(EntryArchiveKeys), StringComparer.OrdinalIgnoreCase);
         HashSet<string>? archiveIdCache = null;
+        // archivePath assigned after fixed playlist folder is known
+        string archivePath = ArchivePathFor(destDir);
 
         void InvalidateArchiveCache() => archiveIdCache = null;
 
@@ -392,6 +409,11 @@ public static class YtDlpDownloader
                 onLine($">> Carpeta de playlist: {folderPath}");
             }
         }
+
+        // Archive next to media (playlist folder when organized) so lists don't share one archive.
+        archivePath = ArchivePathFor(destDir, fixedPlaylistFolder);
+        TryMigrateRootArchive(destDir, archivePath, entries, onLine);
+        InvalidateArchiveCache();
 
         var useSponsorBlock = sponsorBlock
             && (LooksLikeYoutubeUrl(url) || entries.Any(e => IsYoutubeExtractor(e.Extractor)));
@@ -528,7 +550,7 @@ public static class YtDlpDownloader
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                     relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                    onLine, batchProgress, permanentFailures, ct);
+                    onLine, batchProgress, permanentFailures, ct, selectionIds);
                 // If cookie args got disabled mid-run, keep local copy in sync for next pass.
                 cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
             }
@@ -536,7 +558,7 @@ public static class YtDlpDownloader
             {
                 if (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                 {
-                    CookieManager.MarkBrowserBroken(ex.Message);
+                    CookieManager.NoteCookieFailure(ex.Message);
                     cookieArgs = CookieArgs.None;
                     onLine(">> Error de cookies (DPAPI). Reintentando esta pasada sin cookies...");
                     try
@@ -545,7 +567,7 @@ public static class YtDlpDownloader
                             ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                             organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, batchProgress, permanentFailures, ct);
+                            onLine, batchProgress, permanentFailures, ct, selectionIds);
                     }
                     catch (InvalidOperationException ex2)
                     {
@@ -682,11 +704,11 @@ public static class YtDlpDownloader
                             format, videoQuality, audioQuality,
                             attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, itemProgress, permanentFailures, ct);
+                            onLine, itemProgress, permanentFailures, ct, selectionIds);
                     }
                     catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                     {
-                        CookieManager.MarkBrowserBroken(ex.Message);
+                        CookieManager.NoteCookieFailure(ex.Message);
                         cookieArgs = CookieArgs.None;
                         onLine(">>   cookies fallaron; reintento sin cookies...");
                         try
@@ -696,7 +718,7 @@ public static class YtDlpDownloader
                                 format, videoQuality, audioQuality,
                                 attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                                 relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                                onLine, itemProgress, permanentFailures, ct);
+                                onLine, itemProgress, permanentFailures, ct, selectionIds);
                         }
                         catch (InvalidOperationException ex2)
                         {
@@ -728,15 +750,18 @@ public static class YtDlpDownloader
         }
 
         Report(status: "Finalizando...");
-        // Source of truth: anything not in the archive (and not successfully synced) failed.
-        var totalFailed = entries.Count(e => !IsArchived(e, archivePath));
+        // Source of truth: files on disk (not archive alone). Partial/empty files don't count.
+        SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+        InvalidateArchiveCache();
+        var totalFailed = entries.Count(e =>
+            !EntryHasFileOnDisk(e, destDir, fixedPlaylistFolder));
 
         TryWriteM3u(organizeInFolders, isMultiItem, destDir, fixedPlaylistFolder, onLine);
 
         if (totalFailed == 0)
             onLine(">> Todos los items se descargaron correctamente.");
         else
-            onLine($">> Listo con {totalFailed} item(s) que no se pudieron bajar (privados, eliminados o bloqueados).");
+            onLine($">> Listo con {totalFailed} item(s) que no se pudieron bajar (privados, eliminados, bloqueados o archivo incompleto).");
 
         return totalFailed;
     }
@@ -767,10 +792,10 @@ public static class YtDlpDownloader
     {
         if (!File.Exists(archivePath) || entries.Count == 0) return 0;
 
-        var roots = new List<string?> { destDir };
-        if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
-            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
-        var index = ExistingMediaIndex.Build(roots.ToArray());
+        var scanRoot = !string.IsNullOrWhiteSpace(fixedPlaylistFolder)
+            ? Path.Combine(destDir, fixedPlaylistFolder)
+            : destDir;
+        var index = ExistingMediaIndex.Build(scanRoot);
 
         // Ids belonging to this run that no longer have a file on disk.
         var staleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -820,16 +845,60 @@ public static class YtDlpDownloader
         var bare = id.StartsWith("url:", StringComparison.Ordinal) ? ""
             : id.StartsWith("idx:", StringComparison.Ordinal) ? ""
             : id;
-        return (!string.IsNullOrEmpty(bare) && index.HasId(bare))
-            || index.HasTitle(e.Title);
+        // Primary: bracket [id] in filename (our yt-dlp template).
+        if (!string.IsNullOrEmpty(bare) && index.HasId(bare))
+            return true;
+        if (index.HasId(id))
+            return true;
+        // Synthetic ids only: strict long title match (never short/fuzzy).
+        if (id.StartsWith("url:", StringComparison.Ordinal) || id.StartsWith("idx:", StringComparison.Ordinal)
+            || string.IsNullOrEmpty(bare))
+            return index.HasTitleStrict(e.Title);
+        return false;
+    }
+
+    /// <summary>
+    /// Copy selection-related lines from legacy root archive into the playlist-folder archive.
+    /// </summary>
+    private static void TryMigrateRootArchive(
+        string destDir, string newArchivePath, List<PlaylistEntry> entries, Action<string>? onLine)
+    {
+        var rootArchive = Path.Combine(destDir, ArchiveFileName);
+        if (string.Equals(Path.GetFullPath(rootArchive), Path.GetFullPath(newArchivePath), StringComparison.OrdinalIgnoreCase))
+            return;
+        if (!File.Exists(rootArchive)) return;
+
+        var keys = new HashSet<string>(entries.SelectMany(EntryArchiveKeys), StringComparer.OrdinalIgnoreCase);
+        if (keys.Count == 0) return;
+
+        try
+        {
+            var existing = ReadArchiveIds(newArchivePath);
+            var toCopy = new List<string>();
+            foreach (var line in File.ReadLines(rootArchive))
+            {
+                if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#')) continue;
+                var m = ArchiveIdRegex.Match(line.Trim());
+                if (!m.Success) continue;
+                var id = m.Groups[1].Value;
+                if (!keys.Contains(id) || existing.Contains(id)) continue;
+                toCopy.Add(line.Trim());
+                existing.Add(id);
+            }
+            if (toCopy.Count == 0) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(newArchivePath)!);
+            File.AppendAllLines(newArchivePath, toCopy);
+            onLine?.Invoke($">> Archive: migrados {toCopy.Count} id(s) desde la carpeta padre.");
+        }
+        catch { /* ignore */ }
     }
 
     private static bool EntryHasFileOnDisk(PlaylistEntry e, string destDir, string? fixedPlaylistFolder)
     {
-        var roots = new List<string?> { destDir };
+        // When organized, only scan the playlist folder (don't match sibling playlists in destDir).
         if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
-            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
-        return EntryOnDisk(e, ExistingMediaIndex.Build(roots.ToArray()));
+            return EntryOnDisk(e, ExistingMediaIndex.Build(Path.Combine(destDir, fixedPlaylistFolder)));
+        return EntryOnDisk(e, ExistingMediaIndex.Build(destDir));
     }
 
     private static IEnumerable<string> EntryArchiveKeys(PlaylistEntry e)
@@ -854,10 +923,11 @@ public static class YtDlpDownloader
         List<PlaylistEntry> entries, string destDir, string? fixedPlaylistFolder,
         string archivePath, Action<string>? onLine)
     {
-        var roots = new List<string?> { destDir };
-        if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
-            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
-        var index = ExistingMediaIndex.Build(roots.ToArray());
+        // Scan only the media home for this job (playlist folder or destDir).
+        var scanRoot = !string.IsNullOrWhiteSpace(fixedPlaylistFolder)
+            ? Path.Combine(destDir, fixedPlaylistFolder)
+            : destDir;
+        var index = ExistingMediaIndex.Build(scanRoot);
         if (index.FileCount == 0) return 0;
 
         var archived = ReadArchiveIds(archivePath);
@@ -1048,7 +1118,8 @@ public static class YtDlpDownloader
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
-        CancellationToken ct)
+        CancellationToken ct,
+        HashSet<string>? selectionIds = null)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -1060,7 +1131,7 @@ public static class YtDlpDownloader
                     organizeInFolders, sponsorBlock, isPlaylist, destDir, archivePath,
                     relaxed, embedExtras, cookies, fixedPlaylistFolder,
                     onLine, onProgress, permanentFailures,
-                    code => lastExitCode = code, ct);
+                    code => lastExitCode = code, ct, selectionIds);
             }
             catch (InvalidOperationException) when (lastExitCode < 0 && attempt <= MaxAbortRetries)
             {
@@ -1083,7 +1154,8 @@ public static class YtDlpDownloader
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
-        Action<int> onExitCode, CancellationToken ct)
+        Action<int> onExitCode, CancellationToken ct,
+        HashSet<string>? selectionIds = null)
     {
         var extraArgs = new List<string>();
         var formatSelector = BuildFormatSelector(format, videoQuality, audioQuality, extraArgs, relaxed);
@@ -1311,9 +1383,12 @@ public static class YtDlpDownloader
             if (IsPermanentErrorMessage(line))
             {
                 var id = ExtractIdFromError(line) ?? lastExtractorId;
-                // Reject junk like pure digits from item counters (length < 3 or all digits short).
-                if (!string.IsNullOrEmpty(id) && id.Length >= 3 && !IsLikelyItemCounter(id))
+                // Only mark permanent if id belongs to this selection (never junk counters / other videos).
+                if (!string.IsNullOrEmpty(id) && id.Length >= 3 && !IsLikelyItemCounter(id)
+                    && (selectionIds == null || selectionIds.Count == 0 || SelectionContainsId(selectionIds, id)))
+                {
                     permanentFailures.Add(id);
+                }
                 onLine($">>   (no disponible, no se reintentara): {Truncate(line, 160)}");
                 onProgress(new DownloadProgressUpdate
                 {
@@ -1339,15 +1414,32 @@ public static class YtDlpDownloader
         // Surface cookie/DPAPI failure so the caller can retry without cookies.
         if (cookieFailSeen && cookies.Enabled)
         {
-            CookieManager.MarkBrowserBroken("DPAPI/cookie error during download");
+            if (CookieManager.NoteCookieFailure("DPAPI/cookie error during download"))
+            {
+                throw new InvalidOperationException(CookieManager.FriendlyCookieError("Failed to decrypt with DPAPI"));
+            }
+            // First failure only: continue without disabling session yet; caller may retry.
             throw new InvalidOperationException(CookieManager.FriendlyCookieError("Failed to decrypt with DPAPI"));
         }
 
+        CookieManager.NoteCookieSuccess();
         return softErrorCount;
     }
 
     private static bool IsLikelyItemCounter(string id) =>
         id.Length <= 4 && int.TryParse(id, out _);
+
+    private static bool SelectionContainsId(HashSet<string> selectionIds, string id)
+    {
+        if (selectionIds.Contains(id)) return true;
+        foreach (var s in selectionIds)
+        {
+            if (s.Equals(id, StringComparison.OrdinalIgnoreCase)) return true;
+            if (s.Length >= 3 && id.Contains(s, StringComparison.OrdinalIgnoreCase)) return true;
+            if (id.Length >= 3 && s.Contains(id, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
 
     private static bool IsIgnorableError(string line)
     {
@@ -1418,10 +1510,18 @@ public static class YtDlpDownloader
 
     private static bool IsPermanent(PlaylistEntry e, HashSet<string> permanent)
     {
-        if (!string.IsNullOrEmpty(e.Id) && permanent.Contains(e.Id)) return true;
-        // Also match bare extractor id if our entry id is the raw id.
-        if (permanent.Contains(e.Id)) return true;
+        if (permanent.Count == 0) return false;
         if (e.Title is "[Deleted video]" or "[Private video]") return true;
+        foreach (var key in EntryArchiveKeys(e))
+        {
+            if (permanent.Contains(key)) return true;
+            foreach (var p in permanent)
+            {
+                if (p.Equals(key, StringComparison.OrdinalIgnoreCase)) return true;
+                if (key.Length >= 3 && p.Contains(key, StringComparison.OrdinalIgnoreCase)) return true;
+                if (p.Length >= 3 && key.Contains(p, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
         return false;
     }
 

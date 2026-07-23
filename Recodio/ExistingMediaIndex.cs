@@ -9,9 +9,12 @@ public sealed class ExistingMediaIndex
     private static readonly string[] MediaExts =
         [".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".avi", ".mov", ".aac"];
 
+    // Incomplete / junk: never treat as "already downloaded".
+    private const long MinPlausibleBytes = 32 * 1024; // 32 KB
+
     // Filename stem without extension, lower-invariant, punctuation collapsed.
     private readonly HashSet<string> _stems = new(StringComparer.OrdinalIgnoreCase);
-    // Ids found as " [id]" or " [id]." in names (yt-dlp / our template).
+    // Ids found as " [id]" in names (yt-dlp / our template) — primary skip key.
     private readonly HashSet<string> _ids = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _fileNames = [];
 
@@ -30,8 +33,16 @@ public sealed class ExistingMediaIndex
             {
                 foreach (var f in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
                 {
+                    if (IsIncompletePath(f)) continue;
                     var ext = Path.GetExtension(f).ToLowerInvariant();
                     if (!MediaExts.Contains(ext)) continue;
+                    try
+                    {
+                        var len = new FileInfo(f).Length;
+                        if (len < MinPlausibleBytes) continue; // partial / empty
+                    }
+                    catch { continue; }
+
                     var name = Path.GetFileNameWithoutExtension(f);
                     if (string.IsNullOrWhiteSpace(name)) continue;
                     idx._fileNames.Add(name);
@@ -45,54 +56,69 @@ public sealed class ExistingMediaIndex
         return idx;
     }
 
+    /// <summary>.part / .ytdl / names that look like in-progress downloads.</summary>
+    public static bool IsIncompletePath(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrEmpty(name)) return true;
+        if (name.EndsWith(".part", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.Contains(".part.", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase)) return true;
+        if (name.EndsWith(".temp", StringComparison.OrdinalIgnoreCase)) return true;
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext is ".part" or ".ytdl" or ".tmp" or ".crdownload" or ".download") return true;
+        return false;
+    }
+
     public bool HasId(string? id)
     {
         if (string.IsNullOrWhiteSpace(id)) return false;
         // Strip synthetic prefixes
         var bare = id.StartsWith("url:", StringComparison.OrdinalIgnoreCase) ? ""
-            : id.StartsWith("idx:", StringComparison.OrdinalIgnoreCase) ? id["idx:".Length..]
+            : id.StartsWith("idx:", StringComparison.OrdinalIgnoreCase) ? ""
             : id;
         if (!string.IsNullOrEmpty(bare) && _ids.Contains(bare)) return true;
         if (_ids.Contains(id)) return true;
-        // Also check id appears as substring in any stem (conservative: require bracket form preferred)
         return false;
     }
 
-    public bool HasTitle(string? title)
+    /// <summary>
+    /// Strict title match for synthetic ids only: exact normalized stem, or stem that is
+    /// "Title [id]" with long title (>= 16 chars). Avoids short false positives.
+    /// </summary>
+    public bool HasTitleStrict(string? title)
     {
         if (string.IsNullOrWhiteSpace(title)) return false;
         var n = Normalize(title);
-        if (n.Length < 4) return false;
+        if (n.Length < 16) return false; // short titles never skip by title alone
         if (_stems.Contains(n)) return true;
-        // Filename is often "Title [id]" — stem normalize still contains title tokens.
-        // Match if any file stem starts with normalized title or equals title before " ["
         foreach (var stem in _stems)
         {
-            if (stem.StartsWith(n, StringComparison.OrdinalIgnoreCase) && stem.Length <= n.Length + 50)
-                return true;
-            // "Artist - Title" style: ends with title
-            if (stem.EndsWith(n, StringComparison.OrdinalIgnoreCase) && stem.Length <= n.Length + 80)
-                return true;
-            if (stem.Contains(n, StringComparison.OrdinalIgnoreCase) && n.Length >= 12)
+            // Exact title before trailing " [id]" segment
+            var stemNoId = Regex.Replace(stem, @"\s*\[[^\]]+\]\s*$", "").Trim();
+            if (stemNoId.Equals(n, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;
     }
 
+    /// <summary>Legacy loose match — prefer HasId / HasTitleStrict for yt-dlp seed.</summary>
+    public bool HasTitle(string? title) => HasTitleStrict(title);
+
     public bool HasArtistTitle(string? artist, string? title)
     {
         if (string.IsNullOrWhiteSpace(title)) return false;
-        if (HasTitle(title)) return true;
+        if (HasTitleStrict(title)) return true;
         if (string.IsNullOrWhiteSpace(artist)) return false;
         var combined = Normalize($"{artist} - {title}");
-        if (combined.Length < 6) return false;
+        if (combined.Length < 16) return false;
         if (_stems.Contains(combined)) return true;
         foreach (var stem in _stems)
         {
-            if (stem.Contains(combined, StringComparison.OrdinalIgnoreCase)) return true;
-            // Sometimes "Title - Artist"
+            var stemNoId = Regex.Replace(stem, @"\s*\[[^\]]+\]\s*$", "").Trim();
+            if (stemNoId.Equals(combined, StringComparison.OrdinalIgnoreCase)) return true;
             var alt = Normalize($"{title} - {artist}");
-            if (stem.Contains(alt, StringComparison.OrdinalIgnoreCase)) return true;
+            if (stemNoId.Equals(alt, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }

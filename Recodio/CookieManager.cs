@@ -12,6 +12,10 @@ public static class CookieManager
     private static readonly object Gate = new();
     private static bool _browserCookiesBroken;
     private static string? _brokenReason;
+    // Require several DPAPI/cookie failures before disabling browser cookies for the session
+    // (one locked browser while exporting should not kill the whole session).
+    private static int _cookieFailStreak;
+    private const int CookieFailThreshold = 2;
 
     public static string CookiesFilePath
     {
@@ -38,6 +42,7 @@ public static class CookieManager
         {
             _browserCookiesBroken = false;
             _brokenReason = null;
+            _cookieFailStreak = 0;
         }
     }
 
@@ -47,6 +52,36 @@ public static class CookieManager
         {
             _browserCookiesBroken = true;
             _brokenReason = reason;
+            _cookieFailStreak = CookieFailThreshold;
+        }
+    }
+
+    /// <summary>
+    /// Record a cookie/DPAPI failure. Only disables browser cookies after
+    /// <see cref="CookieFailThreshold"/> failures in this session.
+    /// Returns true if browser cookies are now disabled.
+    /// </summary>
+    public static bool NoteCookieFailure(string reason)
+    {
+        lock (Gate)
+        {
+            _cookieFailStreak++;
+            _brokenReason = reason;
+            if (_cookieFailStreak >= CookieFailThreshold)
+            {
+                _browserCookiesBroken = true;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public static void NoteCookieSuccess()
+    {
+        lock (Gate)
+        {
+            if (!_browserCookiesBroken)
+                _cookieFailStreak = 0;
         }
     }
 
@@ -206,7 +241,7 @@ public static class CookieManager
             {
                 if (IsCookieFailureText(stderr))
                 {
-                    MarkBrowserBroken(stderr.Trim());
+                    NoteCookieFailure(stderr.Trim());
                     onLine?.Invoke(">> No se pudieron exportar cookies (DPAPI/navegador abierto). Se reintenta sin cookies.");
                 }
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
@@ -233,7 +268,7 @@ public static class CookieManager
         {
             onLine?.Invoke($">> Export de cookies falló: {ex.Message}");
             if (IsCookieFailureText(ex.Message))
-                MarkBrowserBroken(ex.Message);
+                NoteCookieFailure(ex.Message);
         }
         finally
         {

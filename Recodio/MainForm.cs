@@ -79,7 +79,15 @@ public class MainForm : Form
         _trayIcon.ContextMenuStrip = BuildTrayMenu();
         _trayIcon.MouseDoubleClick += (_, e) => { if (e.Button == MouseButtons.Left) RestoreWindow(); };
 
-        PipeIpc.StartServer(files => OpenOrAddToConvertForm(files), _ipcCts.Token);
+        PipeIpc.StartServer(
+            onFilesReceived: files => OpenOrAddToConvertForm(files),
+            onActivate: () =>
+            {
+                if (IsDisposed) return;
+                if (InvokeRequired) BeginInvoke(RestoreWindow);
+                else RestoreWindow();
+            },
+            _ipcCts.Token);
 
         Log($"App iniciada (PID {Environment.ProcessId})");
         Log($"Config: {AppPaths.ConfigFile}");
@@ -376,6 +384,24 @@ public class MainForm : Form
     private void ShowSettingsDialog()
     {
         using var form = new SettingsForm(_config, _toolStatus);
+        form.CanApplyAppUpdate = () =>
+        {
+            if (HasActiveDownloads())
+            {
+                MessageBox.Show(this,
+                    "Hay una descarga en curso. Cancela o espera a que termine antes de actualizar Recodio.",
+                    "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+            if (HasOpenDownloadForms())
+            {
+                MessageBox.Show(this,
+                    "Cerra las ventanas de descarga (yt-dlp / spotDL) antes de actualizar Recodio.",
+                    "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+            return true;
+        };
         if (form.ShowDialog(this) != DialogResult.OK) return;
 
         var themeChanged = _config.Theme != form.Theme;
@@ -396,6 +422,9 @@ public class MainForm : Form
         try { Directory.CreateDirectory(_config.WatchDir); } catch { /* user will fix path */ }
         SaveConfig();
         Log($"Configuracion actualizada: watchDir={_config.WatchDir} mode={_config.WatchMode} format={_config.WatchConvertFormat} quality={_config.Quality} theme={_config.Theme} cookies={_config.CookiesBrowser}");
+
+        // Push settings into any open non-modal forms (don't leave stale dest/cookies/quality).
+        ApplySettingsToOpenForms();
 
         if (watchDirChanged || watchModeChanged)
             SetupWatcher();
@@ -496,12 +525,7 @@ public class MainForm : Form
     private void OnWatchPath(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return;
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (FormatConverter.TempExtensions.Contains(ext)) return;
-        // Only convert real media; skip already-converted target format.
-        if (!FormatConverter.ConvertibleExtensions.Contains(ext)) return;
-        var targetExt = Formats.Get(_config.WatchConvertFormat).Extension;
-        if (string.Equals(ext, targetExt, StringComparison.OrdinalIgnoreCase)) return;
+        if (ShouldIgnoreWatchPath(path)) return;
 
         lock (_pendingLock) _pendingWatchFiles.Add(path);
         if (_debounceTimer == null) return;
@@ -519,13 +543,93 @@ public class MainForm : Form
         else Bump();
     }
 
+    /// <summary>
+    /// Paths Recodio must not auto-convert: temp/partial downloads, or files landing
+    /// in active yt-dlp/spotDL destination folders while a download window is open.
+    /// </summary>
+    private bool ShouldIgnoreWatchPath(string path)
+    {
+        try
+        {
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(name)) return true;
+
+            // Incomplete suffixes (even when extension is .part after another ext).
+            if (name.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
+                || name.Contains(".part.", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            if (FormatConverter.TempExtensions.Contains(ext)) return true;
+            if (!FormatConverter.ConvertibleExtensions.Contains(ext)) return true;
+
+            var targetExt = Formats.Get(_config.WatchConvertFormat).Extension;
+            if (string.Equals(ext, targetExt, StringComparison.OrdinalIgnoreCase)) return true;
+
+            // While a download form is open, do not convert files under that form's dest dir.
+            if (HasOpenDownloadForms())
+            {
+                if (IsPathUnderDir(path, _config.DownloadDir)) return true;
+                if (IsPathUnderDir(path, _config.SpotDlDownloadDir)) return true;
+            }
+        }
+        catch { return true; }
+        return false;
+    }
+
+    private static bool IsPathUnderDir(string path, string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return false;
+        try
+        {
+            var fullFile = Path.GetFullPath(path);
+            var fullDir = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                          + Path.DirectorySeparatorChar;
+            return fullFile.StartsWith(fullDir, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private bool HasOpenDownloadForms() =>
+        _downloadForm is { IsDisposed: false } || _spotDlForm is { IsDisposed: false };
+
+    public bool HasActiveDownloads()
+    {
+        if (_downloadForm is { IsDisposed: false } f && f.IsBusy) return true;
+        if (_spotDlForm is { IsDisposed: false } s && s.IsBusy) return true;
+        return false;
+    }
+
+    private void ApplySettingsToOpenForms()
+    {
+        try
+        {
+            if (_downloadForm is { IsDisposed: false })
+                _downloadForm.ApplyExternalSettings(
+                    _config.DownloadDir,
+                    _config.EffectiveCookiesBrowser(),
+                    _config.ClipboardAutoFill);
+
+            if (_spotDlForm is { IsDisposed: false })
+                _spotDlForm.ApplyExternalSettings(_config);
+
+            if (_convertFormatForm is { IsDisposed: false })
+                _convertFormatForm.ApplyExternalSettings(_config.Quality, _config.OnFileExists);
+        }
+        catch (Exception ex)
+        {
+            Log($"No se pudieron aplicar settings a ventanas abiertas: {ex.Message}");
+        }
+    }
+
     private async Task ProcessPendingWatchFilesAsync()
     {
         _debounceTimer?.Stop();
         List<string> batch;
         lock (_pendingLock)
         {
-            batch = _pendingWatchFiles.ToList();
+            batch = _pendingWatchFiles.Where(p => !ShouldIgnoreWatchPath(p)).ToList();
             _pendingWatchFiles.Clear();
         }
         if (batch.Count == 0) return;
@@ -789,16 +893,8 @@ public class MainForm : Form
         _sweeping = true;
         try
         {
-            var targetExt = Formats.Get(_config.WatchConvertFormat).Extension;
             var files = Directory.EnumerateFiles(_config.WatchDir, "*", SearchOption.AllDirectories)
-                .Where(f =>
-                {
-                    var ext = Path.GetExtension(f).ToLowerInvariant();
-                    if (FormatConverter.TempExtensions.Contains(ext)) return false;
-                    if (string.Equals(ext, targetExt, StringComparison.OrdinalIgnoreCase)) return false;
-                    // Only real media — never try .txt/.json/etc.
-                    return FormatConverter.ConvertibleExtensions.Contains(ext);
-                });
+                .Where(f => !ShouldIgnoreWatchPath(f));
             var any = false;
             foreach (var file in files)
             {

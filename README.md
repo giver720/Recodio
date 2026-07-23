@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.13**
+**Versión actual: 1.3.15**
 
 ## Requisitos
 
@@ -90,6 +90,17 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.15
+- yt-dlp (Recodio): archive **por carpeta de playlist**; seed solo por `[id]` (título estricto)
+- Ignora archivos parciales (&lt;32KB / `.part`); fallos = sin archivo en disco
+- Permanent fail solo si el id es de la selección; cookies DPAPI requieren 2 fallos
+
+### 1.3.14
+- App: settings se aplican a ventanas abiertas; aviso si cambia la URL analizada
+- IPC: 2.ª instancia trae Recodio al frente; pipe multi-cliente
+- Watch: ignora `.part` y carpetas de descarga activas; confirmar al cerrar con operación en curso
+- No actualizar Recodio con descargas abiertas/en curso
 
 ### 1.3.13
 - Progreso: barra de archivo no baja en merge video+audio; omitidos se mantienen ⏭

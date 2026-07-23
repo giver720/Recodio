@@ -403,13 +403,26 @@ public class SpotDlForm : Form
 
         FormClosing += (_, e) =>
         {
-            if (_cts == null && _analyzeCts == null)
+            if (!IsBusy)
             {
                 _progress.StopTimer();
                 return;
             }
+            if (!_closeRequested)
+            {
+                var r = MessageBox.Show(this,
+                    "Hay un analisis o descarga en curso.\n\n¿Cancelar la operacion y cerrar?",
+                    "Recodio", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
             e.Cancel = true;
             _closeRequested = true;
+            _btnCancel.Enabled = false;
+            _progress.SetStatus("Cancelando...");
             _cts?.Cancel();
             _analyzeCts?.Cancel();
         };
@@ -429,6 +442,35 @@ public class SpotDlForm : Form
             _txtQuery.Focus();
             _txtQuery.SelectAll();
         };
+    }
+
+    public bool IsBusy => _cts != null || _analyzeCts != null;
+
+    /// <summary>Refresh dest/cookies/options from main config while this form is open.</summary>
+    public void ApplyExternalSettings(AppConfig config)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => ApplyExternalSettings(config)); return; }
+        if (IsBusy)
+        {
+            _progress.SetStatus("Config cambio; se aplicara en la proxima descarga.");
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(config.SpotDlDownloadDir))
+            _txtDest.Text = config.SpotDlDownloadDir;
+        var idx = BrowserCookies.IndexOfKey(config.EffectiveCookiesBrowser());
+        if (idx >= 0 && idx < _cmbCookies.Items.Count)
+            _cmbCookies.SelectedIndex = idx;
+        // Keep form checkboxes in sync with config when not mid-download.
+        _chkLyrics.Checked = config.SpotDlLyrics;
+        _chkSkipExisting.Checked = config.SpotDlSkipExisting;
+        _chkOrganizeFolders.Checked = config.SpotDlOrganizeInFolders;
+        _chkSponsorBlock.Checked = config.SpotDlSponsorBlock;
+        _numThreads.Value = Math.Clamp(config.SpotDlThreads, 1, SpotDlDownloader.MaxThreads);
+        var fi = Array.IndexOf(SpotDlDownloader.Formats, config.SpotDlFormat);
+        if (fi >= 0) _cmbFormat.SelectedIndex = fi;
+        var bi = Array.IndexOf(SpotDlDownloader.Bitrates, config.SpotDlBitrate);
+        if (bi >= 0) _cmbBitrate.SelectedIndex = bi;
     }
 
     private void SetAllChecked(bool value)

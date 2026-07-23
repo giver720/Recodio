@@ -135,14 +135,27 @@ public class ConvertFormatForm : Form
 
         FormClosing += (_, e) =>
         {
-            if (_cts == null)
+            if (!IsBusy)
             {
                 _progress.StopTimer();
                 return;
             }
+            if (!_closeRequested)
+            {
+                var r = MessageBox.Show(this,
+                    "Hay una conversion en curso.\n\n¿Cancelar y cerrar?",
+                    "Recodio", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
             e.Cancel = true;
             _closeRequested = true;
-            _cts.Cancel();
+            _btnCancel.Enabled = false;
+            _progress.SetStatus("Cancelando...");
+            _cts?.Cancel();
         };
         FormClosed += (_, _) => _progress.StopTimer();
     }
@@ -150,6 +163,17 @@ public class ConvertFormatForm : Form
     private void CloseIfPending()
     {
         if (_closeRequested && _cts == null) Close();
+    }
+
+    public bool IsBusy => _cts != null;
+
+    public void ApplyExternalSettings(string quality, string onFileExists)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => ApplyExternalSettings(quality, onFileExists)); return; }
+        if (IsBusy) return;
+        _cmbQuality.SelectedIndex = quality switch { "medium" => 1, "low" => 2, _ => 0 };
+        _cmbOnExists.SelectedIndex = onFileExists switch { "overwrite" => 1, "rename" => 2, _ => 0 };
     }
 
     public void AddFiles(IEnumerable<string> files)

@@ -20,7 +20,13 @@ static class Program
                     "Recodio");
                 return;
             }
-            MessageBox.Show("Recodio ya esta corriendo. Fijate en la bandeja del sistema.", "Recodio");
+            // No args: bring the existing instance to the front (tray / main window).
+            if (!PipeIpc.TrySendActivate())
+            {
+                MessageBox.Show(
+                    "Recodio ya esta corriendo. Fijate en la bandeja del sistema.",
+                    "Recodio");
+            }
             return;
         }
 
