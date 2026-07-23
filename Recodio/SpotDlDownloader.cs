@@ -50,10 +50,24 @@ public static class SpotDlDownloader
 
     public static string ResolveSpotDlPath()
     {
-        var candidate = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Programs", "Python", "Python312", "Scripts", "spotdl.exe");
-        return File.Exists(candidate) ? candidate : "spotdl";
+        // Common install locations (newest first-ish).
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        foreach (var rel in new[]
+        {
+            @"Programs\Python\Python313\Scripts\spotdl.exe",
+            @"Programs\Python\Python312\Scripts\spotdl.exe",
+            @"Programs\Python\Python311\Scripts\spotdl.exe",
+            @"Programs\Python\Python310\Scripts\spotdl.exe",
+        })
+        {
+            var candidate = Path.Combine(local, rel);
+            if (File.Exists(candidate)) return candidate;
+        }
+        if (DependencyChecker.TryFindOnPath("spotdl.exe", out var found) && found != null)
+            return found;
+        if (DependencyChecker.TryFindOnPath("spotdl", out found) && found != null)
+            return found;
+        return "spotdl";
     }
 
     public static IReadOnlyList<string> ParseProvidersCsv(string? csv)
@@ -147,6 +161,8 @@ public static class SpotDlDownloader
     //
     // Returns the number of tracks that still failed after all retries.
 
+    // knownTracksMeta: optional Artist/Name for each URL so we can skip files already on disk
+    // even when the .spotdl archive is missing (folder-based skip).
     public static async Task<int> DownloadAsync(
         string spotdlPath, string ffmpegPath, string query,
         IReadOnlyList<string>? trackUrls,
@@ -155,7 +171,8 @@ public static class SpotDlDownloader
         string destDir,
         IReadOnlyList<string>? audioProviders,
         string cookiesFromBrowser,
-        Action<string> onLine, Action<int, int> onProgress, CancellationToken ct)
+        Action<string> onLine, Action<int, int> onProgress, CancellationToken ct,
+        IReadOnlyList<SpotDlTrack>? knownTracksMeta = null)
     {
         Directory.CreateDirectory(destDir);
         var archivePath = ArchivePathFor(destDir);
@@ -168,22 +185,51 @@ public static class SpotDlDownloader
         if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
             onLine($">> Cookies de {cookiesFromBrowser} (via yt-dlp) para menos bloqueos de YouTube.");
 
+        // Always skip tracks already present as files under dest (playlist re-run safety).
+        // When skipExisting is also true, we keep/update the spotDL archive accordingly.
+        if (knownTracks != null && knownTracks.Count > 0)
+        {
+            var skipped = SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine);
+            if (skipped > 0)
+                onLine($">> Omitidas {skipped} ya presentes en carpeta (no se re-descargan).");
+        }
+
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
         var permanent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // ----- Phase A: batch passes (archive skips finished tracks) -----
+        // ----- Phase A: batch passes (archive skips finished tracks when skipExisting) -----
         for (var pass = 1; pass <= MaxBatchPasses; pass++)
         {
             ct.ThrowIfCancellationRequested();
 
             if (knownTracks != null)
             {
+                // Folder scan again (files may have landed mid-run).
+                SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine: null);
+
+                // Always skip what's on disk / in archive. "skipExisting=false" only forces
+                // overwrite for tracks that are NOT already present as complete files.
                 var missing = GetMissingUrls(knownTracks, archivePath, permanent);
+                // Extra filter: still on disk by meta even if archive write failed.
+                if (knownTracksMeta is { Count: > 0 })
+                {
+                    var index = ExistingMediaIndex.Build(destDir);
+                    var metaByUrl = knownTracksMeta
+                        .Where(t => !string.IsNullOrWhiteSpace(t.Url))
+                        .GroupBy(t => t.Url, StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                    missing = missing.Where(u =>
+                    {
+                        if (!metaByUrl.TryGetValue(u, out var t)) return true;
+                        return !index.HasArtistTitle(t.Artist, t.Name) && !index.HasTitle(t.Name);
+                    }).ToList();
+                }
+
                 if (missing.Count == 0)
                 {
-                    onLine(">> Todas las canciones seleccionadas ya estan en el archivo.");
+                    onLine(">> Todas las canciones seleccionadas ya estan en carpeta/archive.");
                     onProgress(knownTracks.Count, knownTracks.Count);
-                    return 0;
+                    return permanent.Count;
                 }
                 if (pass > 1)
                 {
@@ -193,7 +239,7 @@ public static class SpotDlDownloader
                 }
                 else
                 {
-                    onLine($">> Descargando {missing.Count} cancion(es) seleccionada(s)...");
+                    onLine($">> Descargando {missing.Count} cancion(es) (omitidas las ya en carpeta)...");
                 }
 
                 // On later passes: fewer threads + full provider chain already set.
@@ -202,9 +248,10 @@ public static class SpotDlDownloader
 
                 try
                 {
+                    // Always pass archive when we have a track list so completed songs stay skipped.
                     await RunWithRateLimitRetryAsync(
                         spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
-                        attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
+                        attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                         archivePath, providers, cookiesFromBrowser,
                         onLine, onProgress, permanent, ct);
                 }
@@ -213,8 +260,9 @@ public static class SpotDlDownloader
                     onLine($">> Pasada {pass}: {ex.Message}");
                 }
 
+                SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine: null);
                 var still = GetMissingUrls(knownTracks, archivePath, permanent).Count;
-                onLine($">> Pasada {pass}: {knownTracks.Count - still}/{knownTracks.Count} en archivo.");
+                onLine($">> Pasada {pass}: {knownTracks.Count - still}/{knownTracks.Count} listas.");
                 if (still == 0) return permanent.Count;
             }
             else
@@ -280,6 +328,7 @@ public static class SpotDlDownloader
             return 1;
         }
 
+        SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine: null);
         var stillMissing = GetMissingUrls(knownTracks, archivePath, permanent);
         if (stillMissing.Count == 0) return permanent.Count;
 
@@ -442,12 +491,9 @@ public static class SpotDlDownloader
         if (sponsorBlock)
             psi.ArgumentList.Add("--sponsor-block");
 
-        // Always pass archive so re-runs skip completed tracks (skipExisting toggles whether
-        // we honor it aggressively — when false we still write archive for our own tracking
-        // but use --overwrite force? Actually if skipExisting is false, don't pass archive
-        // so spotDL redownloads. For retry logic we need archive though.
-        // Compromise: always use archive for reliability of "what's done"; skipExisting=false
-        // uses --overwrite force.
+        // skipExisting=true: honor archive so re-runs only fetch missing tracks.
+        // skipExisting=false: do NOT pass --archive (spotDL would still skip archived URLs even
+        // with --overwrite force) so the user can actually re-download.
         if (skipExisting)
         {
             psi.ArgumentList.Add("--archive");
@@ -457,9 +503,6 @@ public static class SpotDlDownloader
         }
         else
         {
-            // Still track successes for our Phase B missing-check, but force re-download.
-            psi.ArgumentList.Add("--archive");
-            psi.ArgumentList.Add(archivePath);
             psi.ArgumentList.Add("--overwrite");
             psi.ArgumentList.Add("force");
         }
@@ -491,10 +534,10 @@ public static class SpotDlDownloader
             if (ErrorLineRegex.IsMatch(line))
             {
                 failCount++;
-                if (IsPermanentError(line))
+                if (IsPermanentError(line) && queries.Count == 1 && IsSpotifyTrackUrl(queries[0]))
                 {
-                    // Try to associate with a query URL if single-track.
-                    if (queries.Count == 1) permanent.Add(queries[0]);
+                    // Only mark single *track* URLs permanent — never a playlist/album query.
+                    permanent.Add(queries[0]);
                 }
             }
         }, exitCode =>
@@ -518,21 +561,94 @@ public static class SpotDlDownloader
 
     private static bool IsPermanentError(string line)
     {
-        // Avoid broad matches like "not found" that also hit transient HTTP errors.
+        // Avoid broad matches (SongError / "not found") that also hit transient failures.
         ReadOnlySpan<string> markers =
         [
-            "LookupError",
             "No results found",
             "Could not find a match",
             "Track no longer exists",
             "Invalid URL",
-            "SongError",
         ];
         foreach (var m in markers)
         {
             if (line.Contains(m, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
+    }
+
+    private static bool IsSpotifyTrackUrl(string q) =>
+        q.Contains("open.spotify.com/track/", StringComparison.OrdinalIgnoreCase)
+        || q.Contains("spotify.com/track/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Adds Spotify track URLs to the spotDL archive when a matching media file already
+    /// exists under destDir (by "Artist - Title" / title). Returns newly skipped count.
+    /// </summary>
+    private static int SeedSpotDlArchiveFromFolder(
+        IReadOnlyList<string> trackUrls,
+        IReadOnlyList<SpotDlTrack>? meta,
+        string destDir,
+        string archivePath,
+        Action<string>? onLine)
+    {
+        var index = ExistingMediaIndex.Build(destDir);
+        if (index.FileCount == 0) return 0;
+
+        var archived = ReadArchive(archivePath);
+        var metaByUrl = meta?
+            .Where(t => !string.IsNullOrWhiteSpace(t.Url))
+            .GroupBy(t => t.Url, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var toAppend = new List<string>();
+        var newly = 0;
+
+        foreach (var url in trackUrls)
+        {
+            if (string.IsNullOrWhiteSpace(url) || archived.Contains(url)) continue;
+
+            var onDisk = false;
+            if (metaByUrl != null && metaByUrl.TryGetValue(url, out var t))
+                onDisk = index.HasArtistTitle(t.Artist, t.Name) || index.HasTitle(t.Name);
+
+            // Fallback: Spotify track id sometimes ends up in filenames.
+            if (!onDisk)
+            {
+                var id = ExtractSpotifyTrackId(url);
+                if (!string.IsNullOrEmpty(id) && index.HasId(id))
+                    onDisk = true;
+            }
+
+            if (!onDisk) continue;
+
+            toAppend.Add(url);
+            archived.Add(url);
+            newly++;
+            if (metaByUrl != null && metaByUrl.TryGetValue(url, out var mt))
+                onLine?.Invoke($">>   ya en carpeta, omitido: {mt.Artist} - {mt.Name}");
+            else
+                onLine?.Invoke($">>   ya en carpeta, omitido: {url}");
+        }
+
+        if (toAppend.Count > 0)
+        {
+            try { File.AppendAllLines(archivePath, toAppend); } catch { /* locked */ }
+        }
+        return newly;
+    }
+
+    private static string? ExtractSpotifyTrackId(string url)
+    {
+        // https://open.spotify.com/track/ABC123?...
+        try
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return null;
+            var segs = u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var i = Array.FindIndex(segs, s => s.Equals("track", StringComparison.OrdinalIgnoreCase));
+            if (i >= 0 && i + 1 < segs.Length) return segs[i + 1];
+        }
+        catch { /* ignore */ }
+        return null;
     }
 
     private static List<string> ReadFailedUrls(string errorsPath)

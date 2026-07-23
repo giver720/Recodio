@@ -230,7 +230,7 @@ public class SpotDlForm : Form
 
         _chkSkipExisting = new CheckBox
         {
-            Text = "Solo nuevas (archive)",
+            Text = "Omitir ya descargadas (carpeta + archive)",
             Location = new Point(120, 74),
             AutoSize = true,
             Checked = config.SpotDlSkipExisting,
@@ -628,6 +628,14 @@ public class SpotDlForm : Form
                 AppendLog($">> {job.Label}");
 
                 var lastTotal = job.TrackUrls?.Count ?? 0;
+                // Pass track metadata so folder scan can skip "Artist - Title" files already on disk.
+                IReadOnlyList<SpotDlTrack>? meta = null;
+                if (job.TrackUrls is { Count: > 0 } && _tracks.Count > 0)
+                {
+                    var urlSet = new HashSet<string>(job.TrackUrls, StringComparer.OrdinalIgnoreCase);
+                    meta = _tracks.Where(t => urlSet.Contains(t.Url)).ToList();
+                }
+
                 var failCount = await SpotDlDownloader.DownloadAsync(
                     _spotdlPath, _ffmpegPath, job.Query, job.TrackUrls,
                     _config.SpotDlFormat, _config.SpotDlBitrate, _config.SpotDlLyrics,
@@ -640,7 +648,8 @@ public class SpotDlForm : Form
                         lastTotal = Math.Max(lastTotal, total);
                         SetProgress(done, total);
                     },
-                    _cts.Token);
+                    _cts.Token,
+                    knownTracksMeta: meta);
 
                 totalFail += failCount;
                 totalOk += Math.Max(lastTotal - failCount, 0);

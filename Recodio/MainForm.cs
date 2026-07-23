@@ -531,33 +531,55 @@ public class MainForm : Form
         if (batch.Count == 0) return;
         if (_sweeping)
         {
-            // Don't drop events while a sweep is running — requeue and try again shortly.
+            // Don't drop events while a convert is running — requeue and try again shortly.
             lock (_pendingLock) foreach (var f in batch) _pendingWatchFiles.Add(f);
-            if (_debounceTimer != null) { _debounceTimer.Stop(); _debounceTimer.Start(); }
+            try { _debounceTimer?.Stop(); _debounceTimer?.Start(); } catch { /* disposed */ }
             return;
         }
 
-        foreach (var file in batch)
+        _sweeping = true;
+        try
         {
-            if (!File.Exists(file)) continue;
-            await ConvertFileAsync(file, deleteOriginal: true);
+            foreach (var file in batch)
+            {
+                if (!File.Exists(file)) continue;
+                await ConvertFileAsync(file, deleteOriginal: true);
+            }
+        }
+        finally
+        {
+            _sweeping = false;
+            UpdateStatus();
+            // If more files arrived while we worked, schedule another pass.
+            lock (_pendingLock)
+            {
+                if (_pendingWatchFiles.Count > 0)
+                {
+                    try { _debounceTimer?.Stop(); _debounceTimer?.Start(); } catch { /* disposed */ }
+                }
+            }
         }
     }
 
-    private static string ResolveFfmpegPath()
-    {
-        var wingetPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Microsoft", "WinGet", "Links", "ffmpeg.exe");
-        return File.Exists(wingetPath) ? wingetPath : "ffmpeg";
-    }
+    private static string ResolveFfmpegPath() =>
+        ResolveToolPath("ffmpeg",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Links", "ffmpeg.exe"));
 
-    private static string ResolveYtDlpPath()
+    private static string ResolveYtDlpPath() =>
+        ResolveToolPath("yt-dlp",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Links", "yt-dlp.exe"));
+
+    // Prefer absolute path so child tools (yt-dlp --ffmpeg-location) never get a bare name.
+    private static string ResolveToolPath(string bareName, string preferredAbsolute)
     {
-        var wingetPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Microsoft", "WinGet", "Links", "yt-dlp.exe");
-        return File.Exists(wingetPath) ? wingetPath : "yt-dlp";
+        if (File.Exists(preferredAbsolute)) return preferredAbsolute;
+        if (DependencyChecker.TryFindOnPath(bareName + ".exe", out var found) && found != null)
+            return found;
+        if (DependencyChecker.TryFindOnPath(bareName, out found) && found != null)
+            return found;
+        return bareName;
     }
 
     private void LoadConfig()
@@ -708,6 +730,9 @@ public class MainForm : Form
                     DateTimeStyles.RoundtripKind, out var last)
                 && (DateTime.Now - last) < TimeSpan.FromHours(24))
                 return;
+            // Never replace yt-dlp/spotDL while a download window is open (same as manual).
+            if (_downloadForm is { IsDisposed: false } || _spotDlForm is { IsDisposed: false })
+                return;
         }
         else if (_downloadForm is { IsDisposed: false } || _spotDlForm is { IsDisposed: false })
         {
@@ -811,6 +836,14 @@ public class MainForm : Form
 
             if (result.Success)
             {
+                // Guard against converting a still-growing download into a tiny truncated file.
+                if (!FormatConverter.OutputLooksPlausible(path, result.OutputPath))
+                {
+                    Log($"Salida sospechosamente chica, no se borra el original: {result.OutputPath}");
+                    try { File.Delete(result.OutputPath); } catch { /* ignore */ }
+                    return;
+                }
+
                 Log($"OK -> {result.OutputPath}");
                 long sizeKB = 0;
                 try { sizeKB = new FileInfo(result.OutputPath).Length / 1024; } catch { /* gone */ }

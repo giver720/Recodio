@@ -41,7 +41,7 @@ public static class DependencyChecker
         return new ToolStatus(name, false, $"{path} — {installHint}");
     }
 
-    private static bool TryFindOnPath(string command, out string? fullPath)
+    public static bool TryFindOnPath(string command, out string? fullPath)
     {
         fullPath = null;
         try

@@ -185,7 +185,7 @@ public static class YtDlpDownloader
         if (ie.Contains("youtube"))
             return $"https://www.youtube.com/watch?v={id}";
         if (ie is "twitter" or "twitterbroadcast" or "twitterspaces")
-            return $"https://twitter.com/i/status/{id}";
+            return $"https://x.com/i/status/{id}";
         if (ie.Contains("tiktok"))
             return $"https://www.tiktok.com/@/video/{id}";
         if (ie.Contains("vimeo"))
@@ -201,18 +201,14 @@ public static class YtDlpDownloader
         return null;
     }
 
+    // Builds -f selector. CRITICAL: never fall back to bare bestvideo (video-only) — that was
+    // leaving silent files when the paired video+audio merge could not be selected.
     public static string BuildFormatSelector(
         string format, string videoQuality, string audioQuality, List<string> extraArgs, bool relaxed = false)
     {
         string? heightFilter = relaxed ? null : videoQuality switch
         {
             "2160" or "1440" or "1080" or "720" or "480" or "360" => videoQuality,
-            _ => null,
-        };
-        string? abrFilter = relaxed ? null : audioQuality switch
-        {
-            "medium" => "192",
-            "low" => "128",
             _ => null,
         };
 
@@ -222,43 +218,44 @@ public static class YtDlpDownloader
             var audioFmt = format == "m4a" ? "m4a" : "mp3";
             extraArgs.AddRange(["-x", "--audio-format", audioFmt, "--audio-quality",
                 relaxed ? "0" : audioQuality switch { "medium" => "192K", "low" => "128K", _ => "0" }]);
-            return "bestaudio*/bestaudio/best";
+            // bestaudio first; progressive "best" as last resort (ffmpeg extracts audio).
+            return "bestaudio/bestaudio*/best";
         }
 
-        var audioSel = abrFilter != null
-            ? $"bestaudio[abr<={abrFilter}]/bestaudio*/bestaudio"
-            : "bestaudio*/bestaudio";
+        // For muxed video: do NOT filter audio by abr in the paired selector. If
+        // bestaudio[abr<=192] fails to match, the whole "bv+ba" unit fails and older
+        // selectors fell through to bestvideo (silent file).
+        // Prefer m4a when remuxing to mp4 (H264+AAC plays everywhere).
+        var ba = format == "mp4"
+            ? "bestaudio[ext=m4a]/bestaudio"
+            : "bestaudio";
 
-        // Keep site-native container when possible (webm, flv, …).
-        if (format == "best")
-        {
-            if (heightFilter != null)
-                return $"bestvideo*[height<={heightFilter}]+{audioSel}/best[height<={heightFilter}]/best";
-            return $"bestvideo*+{audioSel}/best/bestvideo/bestaudio";
-        }
+        if (format is "mp4" or "mkv")
+            extraArgs.AddRange(["--merge-output-format", format == "mkv" ? "mkv" : "mp4"]);
 
-        // Remux/merge into mp4 or mkv. Always end with plain `best` for progressive-only sites.
-        var merge = format == "mkv" ? "mkv" : "mp4";
-        extraArgs.AddRange(["--merge-output-format", merge]);
-
+        // Pair video+audio, then progressive best (has audio). Never bare bestvideo.
+        // bv* = best video excluding weird storyboard formats when * is used by yt-dlp.
         if (heightFilter != null)
         {
-            return $"bestvideo*[height<={heightFilter}]+{audioSel}/"
+            return $"bestvideo*[height<={heightFilter}]+{ba}/"
                  + $"best[height<={heightFilter}]/"
-                 + $"bestvideo*+{audioSel}/best/bestvideo/bestaudio";
+                 + $"bestvideo*+{ba}/"
+                 + "best";
         }
 
-        return $"bestvideo*+{audioSel}/best/bestvideo/bestaudio";
+        return $"bestvideo*+{ba}/best";
     }
 
     // cookiesFromBrowser: "" or chrome|edge|firefox|brave|…
+    // playlistTitle: from Analyze (preferred fixed subfolder name when organizeInFolders).
     // Returns number of items that still failed after all retries (includes permanent).
     public static async Task<int> DownloadAsync(
         string ytDlpPath, string ffmpegPath, string url, List<PlaylistEntry>? selectedEntries,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, string destDir,
         Action<string> onLine, Action<int> onProgress, CancellationToken ct,
-        string cookiesFromBrowser = "")
+        string cookiesFromBrowser = "",
+        string? playlistTitle = null)
     {
         Directory.CreateDirectory(destDir);
         var archivePath = ArchivePathFor(destDir);
@@ -266,14 +263,25 @@ public static class YtDlpDownloader
             ? selectedEntries.Select(NormalizeEntry).ToList()
             : [new PlaylistEntry(1, url, "url:" + url, url, "")];
 
-        // True when the original URL is a multi-item page OR the user selected items that
-        // carry playlist indices. Even a SINGLE checked item from a playlist must use
-        // --playlist-items N (otherwise yt-dlp would re-download the whole list).
-        var usePlaylistItems = entries.Any(e => e.Index > 0)
-            && (entries.Count > 1 || entries[0].Index > 0 && LooksLikePlaylistContext(url, entries));
         // Safer rule: always pass --playlist-items when we have analyzed entries with real
         // indices and the page URL is not itself a single-item direct URL for that entry.
-        usePlaylistItems = ShouldUsePlaylistItems(url, entries);
+        var usePlaylistItems = ShouldUsePlaylistItems(url, entries);
+        var isMultiItem = entries.Count > 1 || usePlaylistItems;
+
+        // Fixed subfolder: prefer title from analyze; else derive a safe name for multi downloads.
+        string? fixedPlaylistFolder = null;
+        if (organizeInFolders && isMultiItem)
+        {
+            fixedPlaylistFolder = SanitizeFolderName(
+                !string.IsNullOrWhiteSpace(playlistTitle) ? playlistTitle!
+                : GuessPlaylistFolderName(url, entries));
+            if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
+            {
+                var folderPath = Path.Combine(destDir, fixedPlaylistFolder);
+                Directory.CreateDirectory(folderPath);
+                onLine($">> Carpeta de playlist: {folderPath}");
+            }
+        }
 
         var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var useSponsorBlock = sponsorBlock
@@ -285,16 +293,27 @@ public static class YtDlpDownloader
         if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
             onLine($">> Usando cookies de {cookiesFromBrowser} (sitios con login / age-gate).");
 
+        // Folder scan: skip anything already on disk (even if archive was wiped).
+        // Always on — never re-download a video that already exists in the playlist folder.
+        var scanRoot = ResolveScanRoot(destDir, fixedPlaylistFolder);
+        var skippedOnDisk = SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        if (skippedOnDisk > 0)
+            onLine($">> Omitidas {skippedOnDisk} ya presentes en carpeta (no se re-descargan).");
+
         // ----- Phase A: batch passes -----
         for (var pass = 1; pass <= MaxBatchPasses; pass++)
         {
             ct.ThrowIfCancellationRequested();
 
+            // Re-scan folder each pass (in case files appeared between passes).
+            SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+
             var missingBefore = CountMissing(entries, archivePath, permanentFailures);
             if (missingBefore == 0)
             {
-                onLine(">> Todos los items ya estan en el archivo de descargas.");
+                onLine(">> Todos los items ya estan descargados (archive + carpeta).");
                 onProgress(100);
+                TryWriteM3u(organizeInFolders, isMultiItem, destDir, fixedPlaylistFolder, onLine);
                 return permanentFailures.Count;
             }
 
@@ -336,16 +355,17 @@ public static class YtDlpDownloader
                 await RunWithAbortRetryAsync(
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
-                    relaxed, embedExtras, cookiesFromBrowser, onLine, onProgress, permanentFailures, ct);
+                    relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                    onLine, onProgress, permanentFailures, ct);
             }
             catch (InvalidOperationException ex)
             {
                 onLine($">> Pasada {pass} termino con error: {ex.Message}");
             }
 
-            // After a batch, mark successful downloads into our synthetic archive keys too
-            // (yt-dlp only writes real extractor ids; url:/idx: keys need file presence checks).
-            SyncSyntheticArchive(entries, destDir, archivePath);
+            // After a batch, mark successful downloads into archive from disk + yt-dlp archive.
+            SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
+            SyncSyntheticArchive(entries, ResolveScanRoot(destDir, fixedPlaylistFolder), archivePath);
 
             var missingAfter = CountMissing(entries, archivePath, permanentFailures);
             onLine($">> Pasada {pass} lista: {entries.Count - missingAfter - permanentFailures.Count}/{entries.Count} ok"
@@ -353,97 +373,102 @@ public static class YtDlpDownloader
                 + (missingAfter > 0 ? $", {missingAfter} pendientes" : "")
                 + ".");
 
-            if (missingAfter == 0) return permanentFailures.Count;
+            if (missingAfter == 0) break;
             if (pass >= 2 && missingAfter >= missingBefore) break;
         }
 
         // ----- Phase B: one-by-one for whatever is still missing -----
         var stillMissing = GetMissing(entries, archivePath, permanentFailures);
-        if (stillMissing.Count == 0) return permanentFailures.Count;
-
-        onLine($">> Reintentando {stillMissing.Count} item(s) uno por uno...");
-
-        for (var i = 0; i < stillMissing.Count; i++)
+        if (stillMissing.Count > 0)
         {
-            ct.ThrowIfCancellationRequested();
-            var entry = stillMissing[i];
-            onProgress((int)(100.0 * i / stillMissing.Count));
+            onLine($">> Reintentando {stillMissing.Count} item(s) uno por uno...");
 
-            if (IsPermanent(entry, permanentFailures))
-                continue;
-
-            var directUrl = ResolveDirectUrl(entry, url);
-            // Prefer direct item URL when we have one; else playlist URL + single index.
-            var canPlaylistIndex = usePlaylistItems && entry.Index > 0;
-
-            var ok = false;
-            for (var attempt = 1; attempt <= MaxPerVideoAttempts && !ok; attempt++)
+            for (var i = 0; i < stillMissing.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (attempt > 1)
+                var entry = stillMissing[i];
+                onProgress((int)(100.0 * i / stillMissing.Count));
+
+                if (IsPermanent(entry, permanentFailures))
+                    continue;
+
+                var directUrl = ResolveDirectUrl(entry, url);
+                // Prefer direct item URL when we have one; else playlist URL + single index.
+                var canPlaylistIndex = usePlaylistItems && entry.Index > 0;
+
+                var ok = false;
+                for (var attempt = 1; attempt <= MaxPerVideoAttempts && !ok; attempt++)
                 {
-                    var wait = attempt * 5;
-                    onLine($">>   reintento {attempt}/{MaxPerVideoAttempts} de \"{entry.Title}\" en {wait}s...");
-                    await Task.Delay(TimeSpan.FromSeconds(wait), ct);
+                    ct.ThrowIfCancellationRequested();
+                    if (attempt > 1)
+                    {
+                        var wait = attempt * 5;
+                        onLine($">>   reintento {attempt}/{MaxPerVideoAttempts} de \"{entry.Title}\" en {wait}s...");
+                        await Task.Delay(TimeSpan.FromSeconds(wait), ct);
+                    }
+                    else
+                    {
+                        onLine($">> [{i + 1}/{stillMissing.Count}] {entry.Title}");
+                    }
+
+                    var relaxed = attempt >= 2;
+                    var embedExtras = attempt == 1;
+                    // Attempt 1-2: playlist index (keeps folder layout) when possible.
+                    // Attempt 3+: direct webpage URL (bypasses flaky playlist extract).
+                    var useDirect = (attempt >= 3 || !canPlaylistIndex) && !string.IsNullOrWhiteSpace(directUrl);
+                    string attemptUrl;
+                    List<int>? attemptItems;
+                    if (useDirect)
+                    {
+                        attemptUrl = directUrl!;
+                        attemptItems = null;
+                    }
+                    else if (canPlaylistIndex)
+                    {
+                        attemptUrl = url;
+                        attemptItems = [entry.Index];
+                    }
+                    else
+                    {
+                        attemptUrl = directUrl ?? url;
+                        attemptItems = null;
+                    }
+
+                    // Always keep the fixed playlist folder on retries (even for direct watch URLs).
+                    var attemptOrganize = organizeInFolders;
+                    var itemSponsor = useSponsorBlock
+                        && (LooksLikeYoutubeUrl(attemptUrl) || IsYoutubeExtractor(entry.Extractor));
+
+                    try
+                    {
+                        await RunWithAbortRetryAsync(
+                            ytDlpPath, ffmpegPath, attemptUrl, attemptItems,
+                            format, videoQuality, audioQuality,
+                            attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
+                            relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                            onLine, onProgress, permanentFailures, ct);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        onLine($">>   fallo: {ex.Message}");
+                    }
+
+                    SyncSyntheticArchive([entry], ResolveScanRoot(destDir, fixedPlaylistFolder), archivePath);
+                    ok = IsArchived(entry, archivePath);
                 }
+
+                if (!ok)
+                    onLine($">>   NO se pudo descargar: {entry.Title}");
                 else
-                {
-                    onLine($">> [{i + 1}/{stillMissing.Count}] {entry.Title}");
-                }
-
-                var relaxed = attempt >= 2;
-                var embedExtras = attempt == 1;
-                // Attempt 1-2: playlist index (keeps folder layout) when possible.
-                // Attempt 3+: direct webpage URL (bypasses flaky playlist extract).
-                var useDirect = (attempt >= 3 || !canPlaylistIndex) && !string.IsNullOrWhiteSpace(directUrl);
-                string attemptUrl;
-                List<int>? attemptItems;
-                if (useDirect)
-                {
-                    attemptUrl = directUrl!;
-                    attemptItems = null;
-                }
-                else if (canPlaylistIndex)
-                {
-                    attemptUrl = url;
-                    attemptItems = [entry.Index];
-                }
-                else
-                {
-                    attemptUrl = directUrl ?? url;
-                    attemptItems = null;
-                }
-
-                var attemptOrganize = organizeInFolders && !useDirect;
-                var itemSponsor = useSponsorBlock
-                    && (LooksLikeYoutubeUrl(attemptUrl) || IsYoutubeExtractor(entry.Extractor));
-
-                try
-                {
-                    await RunWithAbortRetryAsync(
-                        ytDlpPath, ffmpegPath, attemptUrl, attemptItems,
-                        format, videoQuality, audioQuality,
-                        attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
-                        relaxed, embedExtras, cookiesFromBrowser, onLine, onProgress, permanentFailures, ct);
-                }
-                catch (InvalidOperationException ex)
-                {
-                    onLine($">>   fallo: {ex.Message}");
-                }
-
-                SyncSyntheticArchive([entry], destDir, archivePath);
-                ok = IsArchived(entry, archivePath);
+                    onLine($">>   OK: {entry.Title}");
             }
-
-            if (!ok)
-                onLine($">>   NO se pudo descargar: {entry.Title}");
-            else
-                onLine($">>   OK: {entry.Title}");
         }
 
         onProgress(100);
         // Source of truth: anything not in the archive (and not successfully synced) failed.
         var totalFailed = entries.Count(e => !IsArchived(e, archivePath));
+
+        TryWriteM3u(organizeInFolders, isMultiItem, destDir, fixedPlaylistFolder, onLine);
 
         if (totalFailed == 0)
             onLine(">> Todos los items se descargaron correctamente.");
@@ -451,6 +476,150 @@ public static class YtDlpDownloader
             onLine($">> Listo con {totalFailed} item(s) que no se pudieron bajar (privados, eliminados o bloqueados).");
 
         return totalFailed;
+    }
+
+    private static void TryWriteM3u(
+        bool organizeInFolders, bool isMultiItem, string destDir, string? fixedPlaylistFolder, Action<string> onLine)
+    {
+        if (!organizeInFolders || !isMultiItem || string.IsNullOrWhiteSpace(fixedPlaylistFolder)) return;
+        try
+        {
+            var m3uPath = WritePlaylistM3u(destDir, fixedPlaylistFolder!);
+            if (m3uPath != null)
+                onLine($">> Playlist M3U: {m3uPath}");
+        }
+        catch (Exception ex)
+        {
+            onLine($">> No se pudo escribir el .m3u: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Marks playlist entries as done in the yt-dlp archive when a matching file already
+    /// exists under dest (or the playlist subfolder). Returns how many were newly skipped.
+    /// </summary>
+    private static int SeedArchiveFromFolder(
+        List<PlaylistEntry> entries, string destDir, string? fixedPlaylistFolder,
+        string archivePath, Action<string>? onLine)
+    {
+        var roots = new List<string?> { destDir };
+        if (!string.IsNullOrWhiteSpace(fixedPlaylistFolder))
+            roots.Add(Path.Combine(destDir, fixedPlaylistFolder));
+        var index = ExistingMediaIndex.Build(roots.ToArray());
+        if (index.FileCount == 0) return 0;
+
+        var archived = ReadArchiveIds(archivePath);
+        var toAppend = new List<string>();
+        var newly = 0;
+
+        foreach (var e in entries)
+        {
+            var id = e.Id ?? "";
+            var bare = id.StartsWith("url:", StringComparison.Ordinal) ? ""
+                : id.StartsWith("idx:", StringComparison.Ordinal) ? ""
+                : id;
+
+            var onDisk = (!string.IsNullOrEmpty(bare) && index.HasId(bare))
+                || index.HasTitle(e.Title);
+
+            if (!onDisk) continue;
+
+            // yt-dlp archive lines are "extractor id" (e.g. "youtube dQw4w9WgXcQ"). Writing the
+            // real extractor key makes yt-dlp itself skip; our CountMissing only needs the id.
+            if (!string.IsNullOrEmpty(bare) && !archived.Contains(bare))
+            {
+                var ie = string.IsNullOrWhiteSpace(e.Extractor) ? "youtube" : e.Extractor.Trim();
+                // Common IE keys are lowercase without spaces.
+                ie = ie.Contains("youtube", StringComparison.OrdinalIgnoreCase) ? "youtube"
+                    : ie.Contains("twitter", StringComparison.OrdinalIgnoreCase) || ie.Contains("x.com", StringComparison.OrdinalIgnoreCase) ? "twitter"
+                    : ie.Contains("tiktok", StringComparison.OrdinalIgnoreCase) ? "tiktok"
+                    : ie.Contains("vimeo", StringComparison.OrdinalIgnoreCase) ? "vimeo"
+                    : ie.Contains("soundcloud", StringComparison.OrdinalIgnoreCase) ? "soundcloud"
+                    : "generic";
+                toAppend.Add($"{ie} {bare}");
+                archived.Add(bare);
+                newly++;
+                onLine?.Invoke($">>   ya en carpeta, omitido: {e.Title}");
+            }
+            else if ((id.StartsWith("url:", StringComparison.Ordinal) || id.StartsWith("idx:", StringComparison.Ordinal))
+                     && !archived.Contains(id))
+            {
+                toAppend.Add($"recodio {id}");
+                archived.Add(id);
+                newly++;
+                onLine?.Invoke($">>   ya en carpeta, omitido: {e.Title}");
+            }
+        }
+
+        if (toAppend.Count > 0)
+        {
+            try { File.AppendAllLines(archivePath, toAppend); } catch { /* locked */ }
+        }
+        return newly;
+    }
+
+    private static string ResolveScanRoot(string destDir, string? fixedPlaylistFolder) =>
+        !string.IsNullOrWhiteSpace(fixedPlaylistFolder)
+            ? Path.Combine(destDir, fixedPlaylistFolder)
+            : destDir;
+
+    public static string SanitizeFolderName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "Playlist";
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = name.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
+        var s = new string(chars).Trim().TrimEnd('.', ' ');
+        if (s.Length > 120) s = s[..120].TrimEnd('.', ' ');
+        return string.IsNullOrWhiteSpace(s) ? "Playlist" : s;
+    }
+
+    private static string GuessPlaylistFolderName(string url, List<PlaylistEntry> entries)
+    {
+        try
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var u))
+            {
+                // youtube.com/playlist?list=PLxxx or watch?v=x&list=PLxxx
+                var q = u.Query.TrimStart('?');
+                foreach (var part in q.Split('&', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var kv = part.Split('=', 2);
+                    if (kv.Length == 2
+                        && kv[0].Equals("list", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(kv[1]))
+                        return "Playlist " + Uri.UnescapeDataString(kv[1]);
+                }
+                var segs = u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (segs.Length > 0) return segs[^1];
+            }
+        }
+        catch { /* ignore */ }
+        return entries.Count > 1 ? $"Playlist ({entries.Count} items)" : "Playlist";
+    }
+
+    // Writes destDir/PlaylistName/PlaylistName.m3u listing media files in that folder.
+    private static string? WritePlaylistM3u(string destDir, string playlistFolder)
+    {
+        var folder = Path.Combine(destDir, playlistFolder);
+        if (!Directory.Exists(folder)) return null;
+
+        string[] mediaExts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".opus", ".ogg", ".flac", ".wav", ".mov", ".avi"];
+        var files = Directory.EnumerateFiles(folder, "*", SearchOption.TopDirectoryOnly)
+            .Where(f => mediaExts.Contains(Path.GetExtension(f).ToLowerInvariant()))
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (files.Count == 0) return null;
+
+        var m3uPath = Path.Combine(folder, SanitizeFolderName(playlistFolder) + ".m3u");
+        var lines = new List<string> { "#EXTM3U" };
+        foreach (var f in files)
+        {
+            lines.Add("#EXTINF:-1," + Path.GetFileNameWithoutExtension(f));
+            // Relative paths so the m3u is portable inside the folder.
+            lines.Add(Path.GetFileName(f));
+        }
+        File.WriteAllLines(m3uPath, lines);
+        return m3uPath;
     }
 
     private static PlaylistEntry NormalizeEntry(PlaylistEntry e)
@@ -523,7 +692,7 @@ public static class YtDlpDownloader
         string ytDlpPath, string ffmpegPath, string url, List<int>? playlistItems,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
-        bool relaxed, bool embedExtras, string cookiesFromBrowser,
+        bool relaxed, bool embedExtras, string cookiesFromBrowser, string? fixedPlaylistFolder,
         Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
         CancellationToken ct)
     {
@@ -535,7 +704,8 @@ public static class YtDlpDownloader
                 return await RunOnceAsync(
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, sponsorBlock, isPlaylist, destDir, archivePath,
-                    relaxed, embedExtras, cookiesFromBrowser, onLine, onProgress, permanentFailures,
+                    relaxed, embedExtras, cookiesFromBrowser, fixedPlaylistFolder,
+                    onLine, onProgress, permanentFailures,
                     code => lastExitCode = code, ct);
             }
             catch (InvalidOperationException) when (lastExitCode < 0 && attempt <= MaxAbortRetries)
@@ -551,24 +721,52 @@ public static class YtDlpDownloader
         string ytDlpPath, string ffmpegPath, string url, List<int>? playlistItems,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
-        bool relaxed, bool embedExtras, string cookiesFromBrowser,
+        bool relaxed, bool embedExtras, string cookiesFromBrowser, string? fixedPlaylistFolder,
         Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
         Action<int> onExitCode, CancellationToken ct)
     {
         var extraArgs = new List<string>();
         var formatSelector = BuildFormatSelector(format, videoQuality, audioQuality, extraArgs, relaxed);
 
-        var outputTemplate = organizeInFolders
-            ? "%(playlist_title)s/%(title)s [%(id)s].%(ext)s"
-            : "%(title)s [%(id)s].%(ext)s";
+        // Output layout:
+        // 1) fixed playlist folder from analyze title (most reliable)
+        // 2) dynamic yt-dlp playlist fields with fallbacks
+        // 3) flat into destDir
+        string pathsHome;
+        string outputTemplate;
+        if (organizeInFolders && !string.IsNullOrWhiteSpace(fixedPlaylistFolder))
+        {
+            pathsHome = Path.Combine(destDir, fixedPlaylistFolder!);
+            Directory.CreateDirectory(pathsHome);
+            // Files go directly into the fixed playlist folder (works even for direct watch URLs).
+            outputTemplate = "%(title)s [%(id)s].%(ext)s";
+        }
+        else if (organizeInFolders)
+        {
+            pathsHome = destDir;
+            // Fallbacks: playlist_title → playlist → playlist_id → "Playlist"
+            outputTemplate = "%(playlist_title,playlist,playlist_id&Playlist)s/%(title)s [%(id)s].%(ext)s";
+        }
+        else
+        {
+            pathsHome = destDir;
+            outputTemplate = "%(title)s [%(id)s].%(ext)s";
+        }
+
+        Directory.CreateDirectory(pathsHome);
+        var pathsHomeUnix = pathsHome.Replace('\\', '/');
 
         var args = new List<string>
         {
             "--newline", "--no-warnings",
             "--ffmpeg-location", ffmpegPath,
             "-f", formatSelector,
-            "--output-na-placeholder", "",
-            "-o", $"{destDir.Replace('\\', '/')}/{outputTemplate}",
+            // Prefer formats that actually exist for this client (drops broken/403 formats).
+            "--check-formats",
+            // -P sets the base path; -o is relative to it (more reliable than baking dest into -o).
+            "-P", pathsHomeUnix,
+            "--output-na-placeholder", "NA",
+            "-o", outputTemplate,
             "--ignore-errors",
             "--no-abort-on-error",
             "--no-overwrites",
@@ -584,7 +782,12 @@ public static class YtDlpDownloader
             "--socket-timeout", "30",
             "--concurrent-fragments", "1",
             "--geo-bypass",
+            // When URL is video+playlist, prefer the full list if we asked for playlist items.
+            "--yes-playlist",
         };
+
+        // Remux/merge requires ffmpeg; if merge fails yt-dlp may leave separate streams.
+        // Force postprocessor to remux into one file when possible (already set via merge-output-format).
 
         if (!string.IsNullOrWhiteSpace(cookiesFromBrowser))
         {
@@ -782,8 +985,8 @@ public static class YtDlpDownloader
     }
 
     // For entries with synthetic ids (url:/idx:), yt-dlp won't write them into the archive.
-    // After a run, if a matching media file appeared under destDir, record the synthetic key
-    // so we don't retry forever.
+    // Match strictly against our output template: "%(title)s [%(id)s].%(ext)s" — never short
+    // title substrings alone (that falsely archived "Video" / "Track 1" and skipped retries).
     private static void SyncSyntheticArchive(IEnumerable<PlaylistEntry> entries, string destDir, string archivePath)
     {
         var archived = ReadArchiveIds(archivePath);
@@ -795,26 +998,27 @@ public static class YtDlpDownloader
             if (string.IsNullOrEmpty(e.Id)) continue;
             if (archived.Contains(e.Id)) continue;
 
-            // Real extractor ids: if present in archive under any extractor prefix, OK.
+            // Real extractor ids are written by yt-dlp itself.
             if (!e.Id.StartsWith("url:", StringComparison.Ordinal) && !e.Id.StartsWith("idx:", StringComparison.Ordinal))
-            {
-                if (archived.Contains(e.Id)) continue;
-                // Bare id already handled by yt-dlp archive write; nothing to sync.
                 continue;
-            }
 
-            // Synthetic: look for a file containing the title or id fragment.
             files ??= SafeEnumerateMedia(destDir);
+            var bareId = e.Id.StartsWith("idx:", StringComparison.Ordinal) ? e.Id["idx:".Length..] : "";
+            // Output template uses "[id]" at end of stem for real ids; synthetic url: keys rarely
+            // appear in filenames — require id bracket match when we have a real-looking id, else
+            // a long unique title stem (>= 16 chars) as whole-filename contains check.
             var titleHint = SanitizeFileHint(e.Title);
-            var idHint = e.Id.StartsWith("url:", StringComparison.Ordinal)
-                ? ""
-                : e.Id;
             var found = files.Any(f =>
             {
                 var name = Path.GetFileNameWithoutExtension(f);
-                if (!string.IsNullOrEmpty(titleHint) && name.Contains(titleHint, StringComparison.OrdinalIgnoreCase))
+                // Prefer "[id]" from template when entry had a real id embedded in synthetic key.
+                if (!string.IsNullOrEmpty(bareId) && bareId.Length >= 3
+                    && name.Contains($"[{bareId}]", StringComparison.OrdinalIgnoreCase))
                     return true;
-                if (!string.IsNullOrEmpty(e.Id) && name.Contains(e.Id, StringComparison.OrdinalIgnoreCase))
+                // Webpage URL key: only match if filename ends with a long unique title segment.
+                if (titleHint.Length >= 16
+                    && name.Contains(titleHint, StringComparison.OrdinalIgnoreCase)
+                    && name.Length <= titleHint.Length + 40) // not a random long name that merely contains it
                     return true;
                 return false;
             });

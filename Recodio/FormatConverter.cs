@@ -235,11 +235,13 @@ public static class FormatConverter
         "m4a" => ["-vn", "-map", "0:a", "-c:a", "aac", .. AudioQualityArgs(quality, "aac")],
         "ogg" => ["-vn", "-map", "0:a", "-c:a", "libvorbis", .. AudioQualityArgs(quality, "libvorbis")],
         "opus" => ["-vn", "-map", "0:a", "-c:a", "libopus", .. AudioQualityArgs(quality, "libopus")],
-        "mp4" => ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"],
-        "mkv" => ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k"],
-        "webm" => ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-c:a", "libopus"],
-        "avi" => ["-c:v", "mpeg4", "-vtag", "xvid", "-qscale:v", "4", "-c:a", "libmp3lame"],
-        "mov" => ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k"],
+        // Optional maps (?): audio-only sources still produce a usable file when converting "to video"
+        // containers is avoided by the UI; for real video, pick first video + first audio if present.
+        "mp4" => ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"],
+        "mkv" => ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k"],
+        "webm" => ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0", "-c:a", "libopus"],
+        "avi" => ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "mpeg4", "-vtag", "xvid", "-qscale:v", "4", "-c:a", "libmp3lame"],
+        "mov" => ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k"],
         _ => ["-vn", "-map", "0:a", "-c:a", "libmp3lame", .. AudioQualityArgs(quality, "libmp3lame")],
     };
 
@@ -252,20 +254,44 @@ public static class FormatConverter
         _ => [],
     };
 
+    // Require several identical size samples so a downloader that pauses ≥1s between writes
+    // does not look "done". Then require exclusive open.
     private static async Task<(bool Ready, string? Reason)> WaitUntilReadyAsync(string path, CancellationToken ct = default)
     {
+        const int sampleDelayMs = 1000;
+        const int stableSamplesNeeded = 4; // ~4s of unchanged size
+        const int maxWaitRounds = 90; // ~90s total for size stabilization
+
         long prevSize = -1;
-        for (var i = 0; i < 30; i++)
+        var stableCount = 0;
+        for (var i = 0; i < maxWaitRounds; i++)
         {
             ct.ThrowIfCancellationRequested();
             if (!File.Exists(path)) return (false, "archivo desaparecio antes de convertir");
-            var size = new FileInfo(path).Length;
-            if (size == prevSize && size > 0) break;
+            long size;
+            try { size = new FileInfo(path).Length; }
+            catch (IOException) { await Task.Delay(sampleDelayMs, ct); continue; }
+
+            if (size > 0 && size == prevSize) stableCount++;
+            else stableCount = 0;
             prevSize = size;
-            await Task.Delay(1000, ct);
+            if (stableCount >= stableSamplesNeeded) break;
+            await Task.Delay(sampleDelayMs, ct);
         }
 
-        for (var i = 0; i < 10; i++)
+        if (prevSize <= 0)
+            return (false, "archivo vacio o no se estabilizo el tamano");
+
+        // Reject files that are still "too new" (last write < 2s ago) even if size stable once.
+        try
+        {
+            var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(path);
+            if (age < TimeSpan.FromSeconds(2))
+                await Task.Delay(TimeSpan.FromSeconds(2) - age + TimeSpan.FromMilliseconds(200), ct);
+        }
+        catch { /* ignore */ }
+
+        for (var i = 0; i < 15; i++)
         {
             ct.ThrowIfCancellationRequested();
             try
@@ -275,11 +301,29 @@ public static class FormatConverter
             }
             catch (IOException)
             {
-                await Task.Delay(1000, ct);
+                await Task.Delay(sampleDelayMs, ct);
             }
         }
-        // Never got an exclusive lock (another process, e.g. a still-running download, keeps
-        // writing to it) - do NOT proceed, or ffmpeg may transcode a truncated/incomplete file.
         return (false, "el archivo sigue en uso por otro proceso, no se pudo bloquear para convertir");
+    }
+
+    /// <summary>
+    /// After a successful convert, true if the output looks plausibly complete vs the source
+    /// (guards against truncating a still-growing download).
+    /// </summary>
+    public static bool OutputLooksPlausible(string inputPath, string outputPath)
+    {
+        try
+        {
+            var inLen = new FileInfo(inputPath).Length;
+            var outLen = new FileInfo(outputPath).Length;
+            if (outLen <= 0) return false;
+            // Pure re-mux / same container can be similar size; re-encode audio is often smaller.
+            // Only reject when output is absurdly tiny relative to a large source.
+            if (inLen > 512 * 1024 && outLen < Math.Max(8 * 1024, inLen / 100))
+                return false;
+            return true;
+        }
+        catch { return File.Exists(outputPath); }
     }
 }

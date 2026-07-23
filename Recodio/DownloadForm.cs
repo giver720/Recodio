@@ -29,6 +29,8 @@ public class DownloadForm : Form
 
     private List<PlaylistEntry> _entries = [];
     private string _detectedExtractor = "";
+    private string? _playlistTitle;
+    private string _analyzedUrl = "";
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _analyzeCts;
     private bool _closeRequested;
@@ -154,7 +156,7 @@ public class DownloadForm : Form
 
         _chkOrganizeFolders = new CheckBox
         {
-            Text = "Organizar en subcarpetas por playlist/album (items sueltos quedan sueltos)",
+            Text = "Subcarpeta + archivo .m3u por playlist (items sueltos quedan sueltos)",
             Location = new Point(10, 362),
             AutoSize = true,
             Checked = true,
@@ -210,7 +212,11 @@ public class DownloadForm : Form
         Controls.Add(_btnDownload);
 
         _btnCancel = new Button { Text = "Cancelar", Location = new Point(460, 644), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
-        _btnCancel.Click += (_, _) => _cts?.Cancel();
+        _btnCancel.Click += (_, _) =>
+        {
+            _cts?.Cancel();
+            _analyzeCts?.Cancel();
+        };
         Controls.Add(_btnCancel);
 
         _btnClose = new Button { Text = "Cerrar", Location = new Point(545, 644), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
@@ -299,10 +305,13 @@ public class DownloadForm : Form
         }
 
         _btnAnalyze.Enabled = false;
+        _btnCancel.Enabled = true; // allow cancelling a long analyze
         _lblInfo.Text = "Analizando con yt-dlp (puede tardar en playlists grandes)...";
         _clbEntries.Items.Clear();
         _entries = [];
         _detectedExtractor = "";
+        _playlistTitle = null;
+        _analyzedUrl = "";
         _analyzeCts = new CancellationTokenSource();
         try
         {
@@ -311,6 +320,8 @@ public class DownloadForm : Form
                 _ytDlpPath, url, _analyzeCts.Token, SelectedCookiesBrowser());
             _entries = result.Entries;
             _detectedExtractor = result.Extractor;
+            _playlistTitle = result.IsPlaylist ? result.PlaylistTitle : null;
+            _analyzedUrl = url;
             foreach (var e in _entries)
             {
                 var label = string.IsNullOrEmpty(e.Extractor)
@@ -349,7 +360,8 @@ public class DownloadForm : Form
         finally
         {
             _btnAnalyze.Enabled = true;
-            _analyzeCts.Dispose();
+            if (_cts == null) _btnCancel.Enabled = false;
+            _analyzeCts?.Dispose();
             _analyzeCts = null;
             CloseIfPending();
         }
@@ -357,9 +369,19 @@ public class DownloadForm : Form
 
     private async Task StartDownloadAsync()
     {
-        if (_entries.Count == 0)
+        if (_entries.Count == 0 || string.IsNullOrWhiteSpace(_analyzedUrl))
         {
             MessageBox.Show(this, "Primero analiza una URL.", "Recodio");
+            return;
+        }
+
+        var currentUrl = _txtUrl.Text.Trim();
+        if (!string.Equals(currentUrl, _analyzedUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this,
+                "La URL del cuadro no coincide con la que se analizo.\n\n" +
+                "Volve a presionar Analizar, o restaura la URL original.",
+                "Recodio");
             return;
         }
 
@@ -390,7 +412,8 @@ public class DownloadForm : Form
         var audioQuality = _cmbAudioQuality.SelectedIndex switch { 1 => "medium", 2 => "low", _ => "high" };
         var cookies = SelectedCookiesBrowser();
 
-        var url = _txtUrl.Text.Trim();
+        // Always download the URL that was analyzed (indices/ids belong to that page).
+        var url = _analyzedUrl;
         var label = selectedEntries.Count == 1
             ? selectedEntries[0].Title
             : $"{selectedEntries.Count} items"
@@ -405,23 +428,54 @@ public class DownloadForm : Form
         _cts = new CancellationTokenSource();
         try
         {
+            // Prefer analyzed playlist title so the folder name is stable even on direct-URL retries.
+            var playlistTitle = _playlistTitle;
+            if (string.IsNullOrWhiteSpace(playlistTitle) && selectedEntries.Count > 1)
+                playlistTitle = null; // downloader will guess from URL
+
             var failCount = await YtDlpDownloader.DownloadAsync(
                 _ytDlpPath, _ffmpegPath, url, selectedEntries, format, videoQuality, audioQuality,
                 _chkOrganizeFolders.Checked, _chkRemoveSponsors.Checked, destDir,
                 onLine: AppendLog,
-                onProgress: pct => Invoke(() => _progressBar.Value = Math.Clamp(pct, 0, 100)),
+                onProgress: pct =>
+                {
+                    try
+                    {
+                        if (IsDisposed || !IsHandleCreated) return;
+                        BeginInvoke(() =>
+                        {
+                            try
+                            {
+                                if (!_progressBar.IsDisposed)
+                                    _progressBar.Value = Math.Clamp(pct, 0, 100);
+                            }
+                            catch { /* dispose race */ }
+                        });
+                    }
+                    catch { /* dispose race */ }
+                },
                 _cts.Token,
-                cookiesFromBrowser: cookies);
+                cookiesFromBrowser: cookies,
+                playlistTitle: playlistTitle);
 
             var status = failCount == 0 ? "ok" : failCount >= selectedEntries.Count ? "fail" : "partial";
             var summary = failCount > 0
                 ? $"Descarga completa: {selectedEntries.Count - failCount} ok, {failCount} no se pudieron bajar."
                 : $"Descarga completa: {selectedEntries.Count} item(s) OK.";
             AppendLog($">> {summary}");
+
+            var historyPath = destDir;
+            if (_chkOrganizeFolders.Checked && !string.IsNullOrWhiteSpace(playlistTitle))
+            {
+                var folder = YtDlpDownloader.SanitizeFolderName(playlistTitle!);
+                var candidate = Path.Combine(destDir, folder);
+                if (Directory.Exists(candidate)) historyPath = candidate;
+            }
+
             _onHistory?.Invoke(new HistoryEntry
             {
                 Name = label,
-                Path = destDir,
+                Path = historyPath,
                 Kind = "ytdlp",
                 Status = status,
                 Detail = url,

@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.2**
+**Versión actual: 1.3.6**
 
 ## Requisitos
 
@@ -68,16 +68,18 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 
 ### yt-dlp (cualquier sitio)
 - YouTube, X/Twitter, TikTok, Instagram, SoundCloud, Vimeo, Twitch, Reddit, y el resto de extractores de yt-dlp
-- Formatos: MP4, MKV, mejor original, MP3, M4A
+- Formatos: MP4, MKV, mejor original, MP3, M4A (siempre con audio al merge)
 - Cookies del navegador automáticas (login / age-gate)
-- Archive + reintentos de playlist y por ítem
-- SponsorBlock (solo YouTube)
+- **Omite videos ya en la carpeta** al re-bajar playlists (escaneo de disco + archive)
+- Subcarpeta por playlist + archivo **.m3u**
+- Reintentos de playlist y por ítem; SponsorBlock (solo YouTube)
 
 ### spotDL (Spotify)
 - **Analizar** playlist/álbum: lista tracks, desmarcá las que no quieras
 - Proveedores de audio en fallback: YouTube Music → YouTube → SoundCloud (+ Bandcamp opcional)
 - Mismas cookies del navegador que yt-dlp (menos bot-check)
-- Reintentos por batch y **canción por canción** con archive
+- **Omite canciones ya en la carpeta** (match Artista - Título + archive)
+- Reintentos por batch y canción por canción
 - Cola de varias URLs, subcarpetas por playlist/álbum, SponsorBlock, letras Genius + Musixmatch
 
 ### Conversión (ffmpeg)
@@ -87,22 +89,17 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 
 ## Changelog resumido
 
+### 1.3.6
+- **Skip por carpeta**: yt-dlp y spotDL no re-descargan ítems que ya existen en el destino
+- Escaneo de disco + archive; log de omitidos
+- Bugfixes de estabilidad (watch, URL analizada, archive sintético, audio en merge, etc. desde 1.3.3–1.3.5)
+
 ### 1.3.2
 - Cookies del navegador **globales y automáticas** (detecta Brave al primer arranque)
-- Preferencia en Configuración + combos de yt-dlp/spotDL (se guardan en `%AppData%\Recodio\config.json`)
-- Aplica `--cookies-from-browser` en analyze/download yt-dlp y en spotDL
+- Preferencia en Configuración + combos de yt-dlp/spotDL
 
-### 1.3.1
-- Fixes: selección de 1 ítem en playlist yt-dlp, archive/ids sintéticos, cancelar conversión mata ffmpeg
-- Watch: no saltea `.mp3` si el destino es otro formato; solo convierte media real
-- spotDL: no reporta éxito si falló sin URLs de error; permanent-errors más precisos
-- Settings: winget solo consulta estado (no instala); updater con timeout y ZIP anidado
-- Estabilidad UI: logs/tray/debounce sin crash al cerrar
-
-### 1.3.0
-- spotDL: preview/Analizar, proveedores con fallback, cookies, reintentos por track
-- yt-dlp: multi-sitio, más formatos, cookies, reintentos de playlist
-- Watch automático, AppData, historial unificado, menú de bandeja enriquecido
+### 1.3.1 / 1.3.0
+- Fixes de playlists, watch, conversión, multi-sitio yt-dlp, preview spotDL
 
 ### 1.0.x
 - Versión inicial: conversor + yt-dlp + spotDL, auto-update de tools y de la app

@@ -10,14 +10,17 @@ static class Program
         using var mutex = new Mutex(true, "Global\\Recodio_SingleInstance", out bool createdNew);
         if (!createdNew)
         {
-            if (args.Length > 0 && PipeIpc.TrySendFiles(args))
+            if (args.Length > 0)
             {
+                if (PipeIpc.TrySendFiles(args))
+                    return;
+                MessageBox.Show(
+                    "Recodio ya esta corriendo, pero no se pudieron enviar los archivos a la instancia abierta.\n" +
+                    "Abrila desde la bandeja e intenta de nuevo, o reinicia Recodio.",
+                    "Recodio");
                 return;
             }
-            if (args.Length == 0)
-            {
-                MessageBox.Show("Recodio ya esta corriendo. Fijate en la bandeja del sistema.", "Recodio");
-            }
+            MessageBox.Show("Recodio ya esta corriendo. Fijate en la bandeja del sistema.", "Recodio");
             return;
         }
 

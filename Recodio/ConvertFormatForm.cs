@@ -121,7 +121,7 @@ public class ConvertFormatForm : Form
             Text = "Eliminar el archivo original despues de convertir (solo queda la conversion)",
             Location = new Point(10, 338),
             AutoSize = true,
-            Checked = true,
+            Checked = false, // safer default for manual converts (watch/sweep still deletes)
         };
         Controls.Add(_chkDeleteOriginal);
 
@@ -293,16 +293,28 @@ public class ConvertFormatForm : Form
 
     private void SetFileProgress(int percent, int fileNum, int totalFiles, string fileName)
     {
-        if (InvokeRequired) { Invoke(() => SetFileProgress(percent, fileNum, totalFiles, fileName)); return; }
-        _progressBar.Value = Math.Clamp(percent, 0, 100);
-        _lblProgress.Text = $"Archivo {fileNum} de {totalFiles}: {fileName} - {percent}%";
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(() => SetFileProgress(percent, fileNum, totalFiles, fileName)); return; }
+            if (_progressBar.IsDisposed) return;
+            _progressBar.Value = Math.Clamp(percent, 0, 100);
+            _lblProgress.Text = $"Archivo {fileNum} de {totalFiles}: {fileName} - {percent}%";
+        }
+        catch (ObjectDisposedException) { /* closing */ }
     }
 
     private static string Truncate(string s, int max) => s.Length > max ? s[..max] + "..." : s;
 
     private void AppendLog(string line)
     {
-        if (InvokeRequired) { Invoke(() => AppendLog(line)); return; }
-        _txtLog.AppendText(line + Environment.NewLine);
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke(() => AppendLog(line)); return; }
+            if (_txtLog.IsDisposed) return;
+            _txtLog.AppendText(line + Environment.NewLine);
+        }
+        catch (ObjectDisposedException) { /* closing */ }
     }
 }

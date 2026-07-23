@@ -58,13 +58,34 @@ public static class ToolUpdater
 
     private static string ResolvePythonFor(string spotdlPath)
     {
-        var scriptsDir = Path.GetDirectoryName(spotdlPath);
-        var pythonDir = scriptsDir != null ? Path.GetDirectoryName(scriptsDir) : null;
-        if (pythonDir != null)
+        // ...\PythonXYZ\Scripts\spotdl.exe → ...\PythonXYZ\python.exe
+        if (!string.IsNullOrWhiteSpace(spotdlPath)
+            && !string.Equals(spotdlPath, "spotdl", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(spotdlPath, "spotdl.exe", StringComparison.OrdinalIgnoreCase))
         {
-            var candidate = Path.Combine(pythonDir, "python.exe");
-            if (File.Exists(candidate)) return candidate;
+            var scriptsDir = Path.GetDirectoryName(spotdlPath);
+            var pythonDir = scriptsDir != null ? Path.GetDirectoryName(scriptsDir) : null;
+            if (pythonDir != null)
+            {
+                var candidate = Path.Combine(pythonDir, "python.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
         }
+
+        // Resolve bare "spotdl" via PATH first, then derive python.
+        if (DependencyChecker.TryFindOnPath("spotdl.exe", out var spotdlAbs) && spotdlAbs != null)
+        {
+            var scriptsDir = Path.GetDirectoryName(spotdlAbs);
+            var pythonDir = scriptsDir != null ? Path.GetDirectoryName(scriptsDir) : null;
+            if (pythonDir != null)
+            {
+                var candidate = Path.Combine(pythonDir, "python.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
+        }
+
+        if (DependencyChecker.TryFindOnPath("python.exe", out var py) && py != null)
+            return py;
         return "python";
     }
 }

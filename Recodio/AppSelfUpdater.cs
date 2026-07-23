@@ -31,15 +31,23 @@ public static class AppSelfUpdater
         string? zipUrl = null;
         if (root.TryGetProperty("assets", out var assets))
         {
+            // Prefer the known Windows package name over the first random .zip.
+            string? fallback = null;
             foreach (var asset in assets.EnumerateArray())
             {
                 var name = asset.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                if (!name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                var url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
+                if (url == null) continue;
+                if (name.Contains("win", StringComparison.OrdinalIgnoreCase)
+                    || name.Contains("Recodio", StringComparison.OrdinalIgnoreCase))
                 {
-                    zipUrl = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
+                    zipUrl = url;
                     break;
                 }
+                fallback ??= url;
             }
+            zipUrl ??= fallback;
         }
 
         if (zipUrl == null || string.IsNullOrWhiteSpace(remoteVersion)) return null;
