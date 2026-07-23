@@ -171,7 +171,7 @@ public static class SpotDlDownloader
         string destDir,
         IReadOnlyList<string>? audioProviders,
         string cookiesFromBrowser,
-        Action<string> onLine, Action<int, int> onProgress, CancellationToken ct,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, CancellationToken ct,
         IReadOnlyList<SpotDlTrack>? knownTracksMeta = null)
     {
         Directory.CreateDirectory(destDir);
@@ -180,6 +180,35 @@ public static class SpotDlDownloader
         var knownTracks = trackUrls is { Count: > 0 }
             ? trackUrls.Where(u => !string.IsNullOrWhiteSpace(u)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
             : null;
+
+        var totalKnown = knownTracks?.Count ?? 0;
+        var preSkipped = 0;
+        string? liveTitle = null;
+        var permanent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Report(int done, int total, string? status = null, bool isError = false,
+            string? itemKey = null, QueueItemState? itemState = null, string? currentTitle = null,
+            string phase = "")
+        {
+            if (currentTitle != null) liveTitle = currentTitle;
+            var t = total > 0 ? total : Math.Max(totalKnown, 1);
+            var d = Math.Clamp(done, 0, t);
+            onProgress(new DownloadProgressUpdate
+            {
+                Done = Math.Max(0, d - preSkipped),
+                Total = t,
+                Skipped = preSkipped,
+                Failed = permanent.Count,
+                OverallPercent = (int)Math.Round(100.0 * Math.Min(d + preSkipped, t) / t),
+                FilePercent = 0,
+                Status = status,
+                IsError = isError,
+                CurrentTitle = liveTitle,
+                ItemKey = itemKey,
+                ItemState = itemState,
+                Phase = phase,
+            });
+        }
 
         onLine($">> Proveedores de audio: {string.Join(" → ", providers)}");
 
@@ -205,12 +234,26 @@ public static class SpotDlDownloader
         if (knownTracks != null && knownTracks.Count > 0)
         {
             var skipped = SeedSpotDlArchiveFromFolder(knownTracks, knownTracksMeta, destDir, archivePath, onLine);
+            preSkipped = skipped;
             if (skipped > 0)
+            {
                 onLine($">> Omitidas {skipped} ya presentes en carpeta (no se re-descargan).");
+                foreach (var u in knownTracks)
+                {
+                    if (ArchiveContains(archivePath, u))
+                    {
+                        var title = knownTracksMeta?.FirstOrDefault(t =>
+                            string.Equals(t.Url, u, StringComparison.OrdinalIgnoreCase));
+                        var label = title != null ? $"{title.Artist} - {title.Name}" : u;
+                        Report(done: 0, total: totalKnown, status: "Omitida (ya en carpeta)",
+                            itemKey: u, itemState: QueueItemState.Skipped, currentTitle: label);
+                    }
+                }
+            }
+            Report(done: 0, total: totalKnown, status: "Iniciando...");
         }
 
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
-        var permanent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // ----- Phase A: batch passes (archive skips finished tracks when skipExisting) -----
         for (var pass = 1; pass <= MaxBatchPasses; pass++)
@@ -243,18 +286,22 @@ public static class SpotDlDownloader
                 if (missing.Count == 0)
                 {
                     onLine(">> Todas las canciones seleccionadas ya estan en carpeta/archive.");
-                    onProgress(knownTracks.Count, knownTracks.Count);
+                    Report(knownTracks.Count, knownTracks.Count, status: "Todas ya estaban descargadas.");
                     return permanent.Count;
                 }
                 if (pass > 1)
                 {
                     var wait = Math.Min(5 + pass * 3, 20);
                     onLine($">> Reintento batch {pass}/{MaxBatchPasses}: faltan {missing.Count}. Esperando {wait}s...");
+                    Report(knownTracks.Count - missing.Count, knownTracks.Count,
+                        status: $"Reintento batch {pass}/{MaxBatchPasses}: faltan {missing.Count}", phase: "retry");
                     await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                 }
                 else
                 {
                     onLine($">> Descargando {missing.Count} cancion(es) (omitidas las ya en carpeta)...");
+                    Report(knownTracks.Count - missing.Count, knownTracks.Count,
+                        status: $"Descargando {missing.Count} cancion(es)...", phase: "download");
                 }
 
                 // On later passes: fewer threads + full provider chain already set.
@@ -395,11 +442,16 @@ public static class SpotDlDownloader
         {
             ct.ThrowIfCancellationRequested();
             var url = stillMissing[i];
-            onProgress(i, stillMissing.Count);
+            var meta = knownTracksMeta?.FirstOrDefault(t =>
+                string.Equals(t.Url, url, StringComparison.OrdinalIgnoreCase));
+            var label = meta != null ? $"{meta.Artist} - {meta.Name}" : url;
+            Report(i, stillMissing.Count, status: $"Uno por uno {i + 1}/{stillMissing.Count}",
+                itemKey: url, itemState: QueueItemState.Downloading, currentTitle: label, phase: "retry");
 
             if (permanent.Contains(url))
             {
                 remainingFails++;
+                Report(i, stillMissing.Count, itemKey: url, itemState: QueueItemState.Failed, currentTitle: label);
                 continue;
             }
 
@@ -410,6 +462,8 @@ public static class SpotDlDownloader
                 {
                     var wait = attempt * 4;
                     onLine($">>   reintento {attempt}/{MaxPerTrackAttempts} en {wait}s...");
+                    Report(i, stillMissing.Count, status: $"Reintento {attempt}/{MaxPerTrackAttempts}",
+                        currentTitle: label, phase: "retry");
                     await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                 }
                 else
@@ -458,14 +512,18 @@ public static class SpotDlDownloader
             {
                 remainingFails++;
                 onLine($">>   NO se pudo: {url}");
+                Report(i + 1, stillMissing.Count, status: $"Error: {label}", isError: true,
+                    itemKey: url, itemState: QueueItemState.Failed, currentTitle: label);
             }
             else
             {
                 onLine($">>   OK");
+                Report(i + 1, stillMissing.Count, status: $"OK: {label}",
+                    itemKey: url, itemState: QueueItemState.Done, currentTitle: label);
             }
         }
 
-        onProgress(stillMissing.Count, stillMissing.Count);
+        Report(stillMissing.Count, stillMissing.Count, status: "Finalizando...");
         var finalMissing = GetMissingUrls(knownTracks, archivePath, permanent).Count;
         var totalFailed = Math.Max(finalMissing, remainingFails);
         if (totalFailed == 0)
@@ -481,7 +539,7 @@ public static class SpotDlDownloader
         string format, string bitrate, bool embedLyrics, int threads,
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
         string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
-        Action<string> onLine, Action<int, int> onProgress, HashSet<string> permanent,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanent,
         CancellationToken ct, string? errorsPath = null)
     {
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
@@ -500,6 +558,12 @@ public static class SpotDlDownloader
             {
                 attemptThreads = Math.Max(1, attemptThreads / 2);
                 onLine($">> YouTube parece estar bloqueando (rafaga). Reintentando en 8s con {attemptThreads} hilo(s)...");
+                onProgress(new DownloadProgressUpdate
+                {
+                    Status = $"Rate-limit; reintento con {attemptThreads} hilo(s)...",
+                    Phase = "retry",
+                    IsError = true,
+                });
                 await Task.Delay(TimeSpan.FromSeconds(8), ct);
             }
         }
@@ -510,7 +574,7 @@ public static class SpotDlDownloader
         string format, string bitrate, bool embedLyrics, int threads,
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
         string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
-        Action<string> onLine, Action<int, int> onProgress, HashSet<string> permanent,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanent,
         string? errorsPath, CancellationToken ct, Action<int>? onExitCode = null)
     {
         if (queries.Count == 0) return 0;
@@ -592,7 +656,36 @@ public static class SpotDlDownloader
                 && int.TryParse(m.Groups[1].Value, out var done)
                 && int.TryParse(m.Groups[2].Value, out var total))
             {
-                onProgress(done, total);
+                onProgress(new DownloadProgressUpdate
+                {
+                    Done = done,
+                    Total = total,
+                    OverallPercent = total > 0 ? (int)Math.Round(100.0 * done / total) : 0,
+                    Status = $"Descargando canciones… {done} de {total}",
+                    Phase = "download",
+                });
+            }
+
+            // Surface current track when spotDL mentions it.
+            if (line.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Downloaded", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Found YouTube", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Skipping", StringComparison.OrdinalIgnoreCase))
+            {
+                var title = line.Length > 100 ? line[..97] + "..." : line;
+                onProgress(new DownloadProgressUpdate
+                {
+                    CurrentTitle = title.Trim(),
+                    Status = line.Contains("Skipping", StringComparison.OrdinalIgnoreCase)
+                        ? "Omitiendo..."
+                        : line.Contains("Downloaded", StringComparison.OrdinalIgnoreCase)
+                            ? "Cancion lista"
+                            : "Descargando cancion...",
+                    Phase = "download",
+                    ItemState = line.Contains("Skipping", StringComparison.OrdinalIgnoreCase)
+                        ? QueueItemState.Skipped
+                        : QueueItemState.Downloading,
+                });
             }
 
             if (ErrorLineRegex.IsMatch(line))
@@ -602,6 +695,14 @@ public static class SpotDlDownloader
                 {
                     // Only mark single *track* URLs permanent — never a playlist/album query.
                     permanent.Add(queries[0]);
+                    onProgress(new DownloadProgressUpdate
+                    {
+                        ItemKey = queries[0],
+                        ItemState = QueueItemState.Failed,
+                        Status = line.Length > 120 ? line[..117] + "..." : line,
+                        IsError = true,
+                        Phase = "error",
+                    });
                 }
             }
         }, exitCode =>

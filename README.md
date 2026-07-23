@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.8**
+**Versión actual: 1.3.9**
 
 ## Requisitos
 
@@ -90,6 +90,13 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.9
+- Progreso avanzado: **doble barra** (global + archivo), **velocidad / ETA / tamaño** (yt-dlp)
+- Contadores **ok · omitidos · errores · pendientes** y checklist de cola con estados
+- Temporizador y enlace **Abrir carpeta** al terminar
+- Mismo panel en **conversión ffmpeg** (sin log grande)
+- Callback tipado `DownloadProgressUpdate` en yt-dlp y spotDL
 
 ### 1.3.8
 - **UI de progreso** en yt-dlp y spotDL: se eliminó el log de texto grande

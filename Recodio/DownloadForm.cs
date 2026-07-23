@@ -4,10 +4,7 @@ namespace Recodio;
 
 public class DownloadForm : Form
 {
-    private static readonly Regex ItemDeRegex = new(@"Item\s+(\d+)\s+de\s+(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex DestRegex = new(@"\[download\]\s+Destination:\s+(.+)", RegexOptions.Compiled);
-    private static readonly Regex AlreadyRegex = new(@"\[download\]\s+(.+?)\s+has already been downloaded", RegexOptions.Compiled);
-    private static readonly Regex MergingRegex = new(@"\[Merger\]\s+Merging formats into\s+""?(.+?)""?\s*$", RegexOptions.Compiled);
 
     private readonly string _ytDlpPath;
     private readonly string _ffmpegPath;
@@ -40,12 +37,7 @@ public class DownloadForm : Form
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _analyzeCts;
     private bool _closeRequested;
-
-    // Live progress tracking during download
-    private int _dlTotal;
-    private int _dlCompleted;
-    private int _dlCurrentItem; // 1-based when known
-    private int _dlFilePct;
+    private string _lastHistoryPath = "";
 
     public DownloadForm(
         string ytDlpPath,
@@ -64,9 +56,9 @@ public class DownloadForm : Form
         _onCookiesChanged = onCookiesChanged;
 
         Text = "Descargar con yt-dlp (cualquier sitio)";
-        Size = new Size(660, 600);
+        Size = new Size(680, 720);
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(580, 540);
+        MinimumSize = new Size(600, 640);
 
         var lblUrl = new Label
         {
@@ -76,10 +68,10 @@ public class DownloadForm : Form
         };
         Controls.Add(lblUrl);
 
-        _txtUrl = new TextBox { Location = new Point(10, 32), Size = new Size(520, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _txtUrl = new TextBox { Location = new Point(10, 32), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         Controls.Add(_txtUrl);
 
-        _btnAnalyze = new Button { Text = "Analizar", Location = new Point(540, 31), Size = new Size(90, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        _btnAnalyze = new Button { Text = "Analizar", Location = new Point(560, 31), Size = new Size(90, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         _btnAnalyze.Click += async (_, _) => await AnalyzeAsync();
         Controls.Add(_btnAnalyze);
 
@@ -87,7 +79,7 @@ public class DownloadForm : Form
         {
             Text = "Pega cualquier URL que yt-dlp soporte y presiona Analizar.",
             Location = new Point(10, 62),
-            Size = new Size(620, 20),
+            Size = new Size(640, 20),
             AutoEllipsis = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
@@ -96,25 +88,25 @@ public class DownloadForm : Form
         _clbEntries = new CheckedListBox
         {
             Location = new Point(10, 85),
-            Size = new Size(620, 140),
+            Size = new Size(640, 120),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             CheckOnClick = true,
         };
         Controls.Add(_clbEntries);
 
-        _btnAll = new Button { Text = "Todos", Location = new Point(10, 230), Size = new Size(80, 22) };
+        _btnAll = new Button { Text = "Todos", Location = new Point(10, 210), Size = new Size(80, 22) };
         _btnAll.Click += (_, _) => SetAllChecked(true);
         Controls.Add(_btnAll);
 
-        _btnNone = new Button { Text = "Ninguno", Location = new Point(95, 230), Size = new Size(80, 22) };
+        _btnNone = new Button { Text = "Ninguno", Location = new Point(95, 210), Size = new Size(80, 22) };
         _btnNone.Click += (_, _) => SetAllChecked(false);
         Controls.Add(_btnNone);
 
-        var lblFormat = new Label { Text = "Formato de salida:", Location = new Point(10, 262), AutoSize = true };
+        var lblFormat = new Label { Text = "Formato de salida:", Location = new Point(10, 242), AutoSize = true };
         Controls.Add(lblFormat);
         _cmbFormat = new ComboBox
         {
-            Location = new Point(10, 280),
+            Location = new Point(10, 260),
             Size = new Size(240, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
@@ -129,16 +121,16 @@ public class DownloadForm : Form
         _cmbFormat.SelectedIndexChanged += (_, _) => UpdateQualityEnabled();
         Controls.Add(_cmbFormat);
 
-        var lblVideoQ = new Label { Text = "Calidad de video:", Location = new Point(270, 262), AutoSize = true };
+        var lblVideoQ = new Label { Text = "Calidad de video:", Location = new Point(270, 242), AutoSize = true };
         Controls.Add(lblVideoQ);
-        _cmbVideoQuality = new ComboBox { Location = new Point(270, 280), Size = new Size(160, 22), DropDownStyle = ComboBoxStyle.DropDownList };
+        _cmbVideoQuality = new ComboBox { Location = new Point(270, 260), Size = new Size(160, 22), DropDownStyle = ComboBoxStyle.DropDownList };
         _cmbVideoQuality.Items.AddRange(["Mejor disponible", "2160p (4K)", "1440p (2K)", "1080p", "720p", "480p", "360p"]);
         _cmbVideoQuality.SelectedIndex = 0;
         Controls.Add(_cmbVideoQuality);
 
-        var lblAudioQ = new Label { Text = "Calidad de audio:", Location = new Point(450, 262), AutoSize = true };
+        var lblAudioQ = new Label { Text = "Calidad de audio:", Location = new Point(450, 242), AutoSize = true };
         Controls.Add(lblAudioQ);
-        _cmbAudioQuality = new ComboBox { Location = new Point(450, 280), Size = new Size(180, 22), DropDownStyle = ComboBoxStyle.DropDownList, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _cmbAudioQuality = new ComboBox { Location = new Point(450, 260), Size = new Size(200, 22), DropDownStyle = ComboBoxStyle.DropDownList, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         _cmbAudioQuality.Items.AddRange(["Alta", "Media (192k)", "Baja (128k)"]);
         _cmbAudioQuality.SelectedIndex = 0;
         Controls.Add(_cmbAudioQuality);
@@ -146,13 +138,13 @@ public class DownloadForm : Form
         var lblCookies = new Label
         {
             Text = "Cookies (automatico; se guarda en Configuracion):",
-            Location = new Point(10, 312),
+            Location = new Point(10, 292),
             AutoSize = true,
         };
         Controls.Add(lblCookies);
         _cmbCookies = new ComboBox
         {
-            Location = new Point(10, 330),
+            Location = new Point(10, 310),
             Size = new Size(280, 22),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
@@ -169,7 +161,7 @@ public class DownloadForm : Form
         _chkOrganizeFolders = new CheckBox
         {
             Text = "Subcarpeta + archivo .m3u por playlist (items sueltos quedan sueltos)",
-            Location = new Point(10, 362),
+            Location = new Point(10, 342),
             AutoSize = true,
             Checked = true,
         };
@@ -178,17 +170,17 @@ public class DownloadForm : Form
         _chkRemoveSponsors = new CheckBox
         {
             Text = "SponsorBlock (solo YouTube: recortar auspicios)",
-            Location = new Point(10, 386),
+            Location = new Point(10, 366),
             AutoSize = true,
             Checked = false,
         };
         Controls.Add(_chkRemoveSponsors);
 
-        var lblDest = new Label { Text = "Carpeta de destino:", Location = new Point(10, 414), AutoSize = true };
+        var lblDest = new Label { Text = "Carpeta de destino:", Location = new Point(10, 394), AutoSize = true };
         Controls.Add(lblDest);
-        _txtDest = new TextBox { Text = initialDestDir, Location = new Point(10, 432), Size = new Size(520, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+        _txtDest = new TextBox { Text = initialDestDir, Location = new Point(10, 412), Size = new Size(540, 22), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
         Controls.Add(_txtDest);
-        var btnDest = new Button { Text = "...", Location = new Point(540, 431), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var btnDest = new Button { Text = "...", Location = new Point(560, 411), Size = new Size(40, 24), Anchor = AnchorStyles.Top | AnchorStyles.Right };
         btnDest.Click += (_, _) =>
         {
             using var fbd = new FolderBrowserDialog { InitialDirectory = _txtDest.Text.Trim() };
@@ -204,13 +196,13 @@ public class DownloadForm : Form
             if (typed.Length > 0) _onDestDirChanged(typed);
         };
 
-        _progress = new DownloadProgressPanel(10, 466, 620, this);
+        _progress = new DownloadProgressPanel(10, 446, 640, this);
 
-        _btnDownload = new Button { Text = "Descargar", Location = new Point(365, 530), Size = new Size(90, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnDownload = new Button { Text = "Descargar", Location = new Point(385, 665), Size = new Size(90, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         _btnDownload.Click += async (_, _) => await StartDownloadAsync();
         Controls.Add(_btnDownload);
 
-        _btnCancel = new Button { Text = "Cancelar", Location = new Point(460, 530), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
+        _btnCancel = new Button { Text = "Cancelar", Location = new Point(480, 665), Size = new Size(80, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right, Enabled = false };
         _btnCancel.Click += (_, _) =>
         {
             _cts?.Cancel();
@@ -218,7 +210,7 @@ public class DownloadForm : Form
         };
         Controls.Add(_btnCancel);
 
-        _btnClose = new Button { Text = "Cerrar", Location = new Point(545, 530), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+        _btnClose = new Button { Text = "Cerrar", Location = new Point(565, 665), Size = new Size(85, 26), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         _btnClose.Click += (_, _) => Close();
         Controls.Add(_btnClose);
 
@@ -251,7 +243,6 @@ public class DownloadForm : Form
 
     private void UpdateQualityEnabled()
     {
-        // Audio-only formats: video quality N/A
         var audioOnly = _cmbFormat.SelectedIndex is 3 or 4;
         _cmbVideoQuality.Enabled = !audioOnly;
     }
@@ -292,7 +283,6 @@ public class DownloadForm : Form
             return;
         }
 
-        // Spotify is the other pipeline — only look at the textbox URL, not the clipboard.
         if (url.Contains("spotify.com", StringComparison.OrdinalIgnoreCase)
             || url.Contains("spotify.link", StringComparison.OrdinalIgnoreCase))
         {
@@ -304,7 +294,7 @@ public class DownloadForm : Form
         }
 
         _btnAnalyze.Enabled = false;
-        _btnCancel.Enabled = true; // allow cancelling a long analyze
+        _btnCancel.Enabled = true;
         _lblInfo.Text = "Analizando con yt-dlp (puede tardar en playlists grandes)...";
         _progress.SetStatus("Analizando URL...");
         _clbEntries.Items.Clear();
@@ -315,7 +305,6 @@ public class DownloadForm : Form
         _analyzeCts = new CancellationTokenSource();
         try
         {
-            // Pass the same cookie choice used for download — Instagram/X often need it to list items.
             var result = await YtDlpDownloader.AnalyzeAsync(
                 _ytDlpPath, url, _analyzeCts.Token, SelectedCookiesBrowser());
             _entries = result.Entries;
@@ -338,7 +327,6 @@ public class DownloadForm : Form
                 ? $"Lista lista: {_entries.Count} items."
                 : "Item listo para descargar.");
 
-            // Hint cookies for sites that often need a logged-in browser session.
             var mayNeedCookies =
                 site.Contains("instagram", StringComparison.OrdinalIgnoreCase)
                 || site.Contains("twitter", StringComparison.OrdinalIgnoreCase)
@@ -419,7 +407,6 @@ public class DownloadForm : Form
         var audioQuality = _cmbAudioQuality.SelectedIndex switch { 1 => "medium", 2 => "low", _ => "high" };
         var cookies = SelectedCookiesBrowser();
 
-        // Always download the URL that was analyzed (indices/ids belong to that page).
         var url = _analyzedUrl;
         var label = selectedEntries.Count == 1
             ? selectedEntries[0].Title
@@ -430,34 +417,34 @@ public class DownloadForm : Form
         _btnAnalyze.Enabled = false;
         _btnCancel.Enabled = true;
 
-        _dlTotal = selectedEntries.Count;
-        _dlCompleted = 0;
-        _dlCurrentItem = 0;
-        _dlFilePct = 0;
-        _progress.Reset(
-            queueText: $"Cola: 0 / {_dlTotal} items",
+        _progress.Reset(statsText: $"0 ok · {selectedEntries.Count} pend · total {selectedEntries.Count}",
             status: "Iniciando descarga...");
-        if (_dlTotal == 1)
-            _progress.SetCurrent(selectedEntries[0].Title);
+        _progress.StartSession(destDir);
+        _progress.SetQueueItems(selectedEntries.Select(e =>
+            new ProgressQueueItem(YtDlpDownloader.ItemKey(e), e.Title)));
 
+        _lastHistoryPath = destDir;
         _cts = new CancellationTokenSource();
         try
         {
-            // Prefer analyzed playlist title so the folder name is stable even on direct-URL retries.
             var playlistTitle = _playlistTitle;
             if (string.IsNullOrWhiteSpace(playlistTitle) && selectedEntries.Count > 1)
-                playlistTitle = null; // downloader will guess from URL
+                playlistTitle = null;
 
             var failCount = await YtDlpDownloader.DownloadAsync(
                 _ytDlpPath, _ffmpegPath, url, selectedEntries, format, videoQuality, audioQuality,
                 _chkOrganizeFolders.Checked, _chkRemoveSponsors.Checked, destDir,
                 onLine: HandleDownloadLine,
-                onProgress: pct =>
+                onProgress: u =>
                 {
                     try
                     {
                         if (IsDisposed || !IsHandleCreated) return;
-                        BeginInvoke(() => ApplyFilePercent(pct));
+                        BeginInvoke(() =>
+                        {
+                            try { if (!IsDisposed) _progress.Apply(u); }
+                            catch { /* dispose */ }
+                        });
                     }
                     catch { /* dispose race */ }
                 },
@@ -466,18 +453,10 @@ public class DownloadForm : Form
                 playlistTitle: playlistTitle);
 
             var status = failCount == 0 ? "ok" : failCount >= selectedEntries.Count ? "fail" : "partial";
+            var ok = selectedEntries.Count - failCount;
             var summary = failCount > 0
-                ? $"Descarga completa: {selectedEntries.Count - failCount} ok, {failCount} no se pudieron bajar."
-                : $"Descarga completa: {selectedEntries.Count} item(s) OK.";
-
-            Ui(() =>
-            {
-                _progress.SetPercent(100);
-                _progress.SetQueue($"Cola: {_dlTotal - failCount} / {_dlTotal} ok"
-                    + (failCount > 0 ? $", {failCount} error" : ""));
-                _progress.SetStatus(summary, isError: failCount > 0);
-                _progress.SetCurrent("");
-            });
+                ? $"Listo: {ok} ok, {failCount} error(es)."
+                : $"Listo: {selectedEntries.Count} item(s) OK.";
 
             var historyPath = destDir;
             if (_chkOrganizeFolders.Checked && !string.IsNullOrWhiteSpace(playlistTitle))
@@ -486,6 +465,14 @@ public class DownloadForm : Form
                 var candidate = Path.Combine(destDir, folder);
                 if (Directory.Exists(candidate)) historyPath = candidate;
             }
+            _lastHistoryPath = historyPath;
+
+            Ui(() =>
+            {
+                _progress.SetStats($"{ok} ok" + (failCount > 0 ? $" · {failCount} err" : "")
+                    + $" · total {selectedEntries.Count}");
+                _progress.EndSession(summary, isError: failCount > 0, folderPath: historyPath);
+            });
 
             _onHistory?.Invoke(new HistoryEntry
             {
@@ -496,15 +483,17 @@ public class DownloadForm : Form
                 Detail = url,
                 SizeKB = 0,
             });
-            MessageBox.Show(this, summary, "Recodio");
+
+            if (failCount > 0)
+                MessageBox.Show(this, summary, "Recodio", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (OperationCanceledException)
         {
-            Ui(() => _progress.SetStatus("Descarga cancelada."));
+            Ui(() => _progress.EndSession("Descarga cancelada.", folderPath: _lastHistoryPath));
         }
         catch (Exception ex)
         {
-            Ui(() => _progress.SetStatus(ex.Message, isError: true));
+            Ui(() => _progress.EndSession(ex.Message, isError: true, folderPath: destDir));
             _onHistory?.Invoke(new HistoryEntry
             {
                 Name = label,
@@ -526,52 +515,6 @@ public class DownloadForm : Form
         }
     }
 
-    private void ApplyFilePercent(int pct)
-    {
-        try
-        {
-            if (IsDisposed || _progress.Bar.IsDisposed) return;
-            _dlFilePct = Math.Clamp(pct, 0, 100);
-
-            // When downloader reports overall-style jumps (retry phase uses 0..100 of missing batch)
-            // and we don't know current item yet, use raw percent.
-            if (_dlTotal <= 1)
-            {
-                _progress.SetPercent(_dlFilePct);
-                _progress.SetQueue(_dlTotal == 1 ? "Cola: 1 item" : "Cola: —");
-                if (_dlFilePct >= 100)
-                    _progress.SetStatus("Finalizando...");
-                else if (_dlFilePct > 0)
-                    _progress.SetStatus($"Descargando… {_dlFilePct}%");
-                return;
-            }
-
-            // Prefer item-based overall if we saw "Item N de M"
-            if (_dlCurrentItem > 0)
-            {
-                var completed = Math.Max(0, _dlCurrentItem - 1);
-                _dlCompleted = completed;
-                _progress.SetOverallProgress(completed, _dlTotal, _dlFilePct);
-                _progress.SetQueue($"Cola: {completed} / {_dlTotal} · item {_dlCurrentItem} de {_dlTotal}");
-                _progress.SetStatus($"Descargando… {_dlFilePct}% del archivo actual");
-            }
-            else
-            {
-                // File % alone: show as-is but keep queue totals
-                _progress.SetPercent(_dlFilePct);
-                _progress.SetQueue($"Cola: {_dlCompleted} / {_dlTotal} · archivo {_dlFilePct}%");
-                _progress.SetStatus($"Descargando… {_dlFilePct}%");
-            }
-
-            if (_dlFilePct >= 100 && _dlCurrentItem > 0 && _dlCurrentItem > _dlCompleted)
-            {
-                _dlCompleted = _dlCurrentItem;
-                _progress.SetQueue($"Cola: {_dlCompleted} / {_dlTotal}");
-            }
-        }
-        catch { /* dispose race */ }
-    }
-
     private void HandleDownloadLine(string line)
     {
         try
@@ -580,96 +523,31 @@ public class DownloadForm : Form
             if (InvokeRequired) { BeginInvoke(() => HandleDownloadLine(line)); return; }
             if (string.IsNullOrWhiteSpace(line)) return;
 
-            // >> status messages from our wrapper
-            if (line.StartsWith(">> ", StringComparison.Ordinal))
-            {
-                var msg = line[3..].Trim();
-                if (msg.StartsWith("Omitidas", StringComparison.OrdinalIgnoreCase)
-                    || msg.StartsWith("Todos los items", StringComparison.OrdinalIgnoreCase))
-                {
-                    _progress.SetStatus(msg);
-                    // If everything skipped, mark complete
-                    if (msg.StartsWith("Todos los items", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _dlCompleted = _dlTotal;
-                        _progress.SetPercent(100);
-                        _progress.SetQueue($"Cola: {_dlTotal} / {_dlTotal} (ya en carpeta)");
-                    }
-                }
-                else if (msg.StartsWith("Reintento", StringComparison.OrdinalIgnoreCase)
-                         || msg.StartsWith("Descargando", StringComparison.OrdinalIgnoreCase)
-                         || msg.StartsWith("Carpeta", StringComparison.OrdinalIgnoreCase)
-                         || msg.StartsWith("Cookies", StringComparison.OrdinalIgnoreCase)
-                         || msg.StartsWith("SponsorBlock", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("pasada", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("faltan", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("playlist", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("reintenta", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("no disponible", StringComparison.OrdinalIgnoreCase)
-                         || msg.Contains("error", StringComparison.OrdinalIgnoreCase)
-                         || msg.StartsWith("Item ", StringComparison.OrdinalIgnoreCase))
-                {
-                    _progress.SetStatus(msg, isError: msg.Contains("error", StringComparison.OrdinalIgnoreCase)
-                        || msg.Contains("no disponible", StringComparison.OrdinalIgnoreCase));
-                }
-
-                var im = ItemDeRegex.Match(msg);
-                if (im.Success
-                    && int.TryParse(im.Groups[1].Value, out var n)
-                    && int.TryParse(im.Groups[2].Value, out var m)
-                    && m > 0)
-                {
-                    _dlCurrentItem = n;
-                    _dlTotal = Math.Max(_dlTotal, m);
-                    _dlCompleted = Math.Max(_dlCompleted, n - 1);
-                    _dlFilePct = 0;
-                    _progress.SetQueue($"Cola: {_dlCompleted} / {_dlTotal} · item {n} de {m}");
-                    _progress.SetOverallProgress(_dlCompleted, _dlTotal, 0);
-                    _progress.SetStatus($"Procesando item {n} de {m}...");
-                }
-                return;
-            }
-
+            // Keep queue title in sync with destination filename when item key isn't known yet.
             var dest = DestRegex.Match(line);
             if (dest.Success)
             {
                 var name = Path.GetFileName(dest.Groups[1].Value.Trim().Trim('"'));
                 if (!string.IsNullOrEmpty(name))
                     _progress.SetCurrent(name);
-                return;
             }
 
-            var already = AlreadyRegex.Match(line);
-            if (already.Success)
+            if (line.StartsWith(">> ", StringComparison.Ordinal))
             {
-                var name = Path.GetFileName(already.Groups[1].Value.Trim());
-                if (!string.IsNullOrEmpty(name))
-                    _progress.SetCurrent(name + " (ya descargado)");
-                _progress.SetStatus("Omitido: ya estaba descargado.");
-                return;
-            }
-
-            var merge = MergingRegex.Match(line);
-            if (merge.Success)
-            {
-                var name = Path.GetFileName(merge.Groups[1].Value.Trim().Trim('"'));
-                if (!string.IsNullOrEmpty(name))
-                    _progress.SetCurrent(name);
-                _progress.SetStatus("Uniendo video + audio...");
-                return;
-            }
-
-            if (line.Contains("[ExtractAudio]", StringComparison.Ordinal)
-                || line.Contains("Extracting audio", StringComparison.OrdinalIgnoreCase))
-            {
-                _progress.SetStatus("Extrayendo audio...");
-                return;
-            }
-
-            if (line.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase))
-            {
-                var shortErr = line.Length > 120 ? line[..117] + "..." : line;
-                _progress.SetStatus(shortErr, isError: true);
+                var msg = line[3..].Trim();
+                if (msg.Length > 0
+                    && (msg.StartsWith("Omitidas", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Reintento", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Descargando", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Pasada", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Todos", StringComparison.OrdinalIgnoreCase)
+                        || msg.Contains("no disponible", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Carpeta", StringComparison.OrdinalIgnoreCase)
+                        || msg.StartsWith("Cookies", StringComparison.OrdinalIgnoreCase)))
+                {
+                    _progress.SetStatus(msg, isError: msg.Contains("error", StringComparison.OrdinalIgnoreCase)
+                        || msg.Contains("no disponible", StringComparison.OrdinalIgnoreCase));
+                }
             }
         }
         catch (ObjectDisposedException) { /* form closed mid-download */ }

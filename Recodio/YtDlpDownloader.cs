@@ -35,7 +35,12 @@ public static class YtDlpDownloader
         ["", "chrome", "edge", "firefox", "brave", "opera", "chromium"];
 
     private static readonly Regex ProgressRegex = new(@"\[download\]\s+(\d+(?:\.\d+)?)%", RegexOptions.Compiled);
+    // [download]  45.2% of 12.34MiB at 2.10MiB/s ETA 00:03  (fragments of this may be missing)
+    private static readonly Regex ProgressDetailRegex = new(
+        @"\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?(\S+)(?:\s+at\s+(\S+))?(?:\s+ETA\s+(\S+))?",
+        RegexOptions.Compiled);
     private static readonly Regex ItemRegex = new(@"Downloading item (\d+) of (\d+)", RegexOptions.Compiled);
+    private static readonly Regex DestinationRegex = new(@"\[download\]\s+Destination:\s+(.+)", RegexOptions.Compiled);
     private static readonly Regex ErrorLineRegex = new(@"^ERROR:", RegexOptions.Compiled);
     // Archive lines: "youtube VIDEOID" / "twitter 12345" / "Generic hash"
     private static readonly Regex ArchiveIdRegex = new(@"^\S+\s+(\S+)", RegexOptions.Compiled);
@@ -276,7 +281,7 @@ public static class YtDlpDownloader
         string ytDlpPath, string ffmpegPath, string url, List<PlaylistEntry>? selectedEntries,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, string destDir,
-        Action<string> onLine, Action<int> onProgress, CancellationToken ct,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, CancellationToken ct,
         string cookiesFromBrowser = "",
         string? playlistTitle = null)
     {
@@ -285,6 +290,52 @@ public static class YtDlpDownloader
         var entries = selectedEntries is { Count: > 0 }
             ? selectedEntries.Select(NormalizeEntry).ToList()
             : [new PlaylistEntry(1, url, "url:" + url, url, "")];
+
+        var totalItems = entries.Count;
+        var preSkipped = 0;
+        string? liveTitle = null;
+        int liveIndex = 0;
+        var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Report(
+            int filePct = 0,
+            string? status = null,
+            bool isError = false,
+            double? speed = null,
+            TimeSpan? eta = null,
+            string? sizeInfo = null,
+            string phase = "",
+            string? itemKey = null,
+            QueueItemState? itemState = null,
+            string? currentTitle = null)
+        {
+            if (currentTitle != null) liveTitle = currentTitle;
+            var archived = entries.Count(e => IsArchived(e, archivePath));
+            var failed = permanentFailures.Count;
+            var done = Math.Max(0, archived);
+            var overall = totalItems <= 0
+                ? filePct
+                : (int)Math.Round((done + filePct / 100.0) * 100.0 / totalItems);
+            onProgress(new DownloadProgressUpdate
+            {
+                OverallPercent = Math.Clamp(overall, 0, 100),
+                FilePercent = Math.Clamp(filePct, 0, 100),
+                Done = Math.Max(0, done - preSkipped),
+                Total = totalItems,
+                Skipped = preSkipped,
+                Failed = failed,
+                CurrentIndex = liveIndex,
+                CurrentTitle = liveTitle,
+                Status = status,
+                IsError = isError,
+                SpeedBytesPerSec = speed,
+                Eta = eta,
+                SizeInfo = sizeInfo,
+                Phase = phase,
+                ItemKey = itemKey,
+                ItemState = itemState,
+            });
+        }
 
         // Safer rule: always pass --playlist-items when we have analyzed entries with real
         // indices and the page URL is not itself a single-item direct URL for that entry.
@@ -306,7 +357,6 @@ public static class YtDlpDownloader
             }
         }
 
-        var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var useSponsorBlock = sponsorBlock
             && (LooksLikeYoutubeUrl(url) || entries.Any(e => IsYoutubeExtractor(e.Extractor)));
 
@@ -329,8 +379,19 @@ public static class YtDlpDownloader
         // Folder scan: skip anything already on disk (even if archive was wiped).
         // Always on — never re-download a video that already exists in the playlist folder.
         var skippedOnDisk = SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine);
+        preSkipped = skippedOnDisk;
         if (skippedOnDisk > 0)
+        {
             onLine($">> Omitidas {skippedOnDisk} ya presentes en carpeta (no se re-descargan).");
+            // Mark pre-skipped items for the queue UI (by id key).
+            foreach (var e in entries)
+            {
+                if (IsArchived(e, archivePath))
+                    Report(status: "Omitido (ya en carpeta)", itemKey: ItemKey(e), itemState: QueueItemState.Skipped,
+                        currentTitle: e.Title);
+            }
+        }
+        Report(status: "Iniciando...");
 
         // ----- Phase A: batch passes -----
         for (var pass = 1; pass <= MaxBatchPasses; pass++)
@@ -344,7 +405,7 @@ public static class YtDlpDownloader
             if (missingBefore == 0)
             {
                 onLine(">> Todos los items ya estan descargados (archive + carpeta).");
-                onProgress(100);
+                Report(filePct: 0, status: "Todos ya estaban descargados.");
                 TryWriteM3u(organizeInFolders, isMultiItem, destDir, fixedPlaylistFolder, onLine);
                 return permanentFailures.Count;
             }
@@ -353,11 +414,13 @@ public static class YtDlpDownloader
             {
                 var wait = Math.Min(8 + pass * 4, 30);
                 onLine($">> Reintento de lista {pass}/{MaxBatchPasses}: faltan {missingBefore}. Esperando {wait}s...");
+                Report(status: $"Reintento lista {pass}/{MaxBatchPasses}: faltan {missingBefore}", phase: "retry");
                 await Task.Delay(TimeSpan.FromSeconds(wait), ct);
             }
             else
             {
                 onLine($">> Descargando {entries.Count} item(s) (pasada 1/{MaxBatchPasses})...");
+                Report(status: $"Descargando {missingBefore} item(s)...", phase: "download");
             }
 
             // Only the still-missing, non-permanent indices — avoids re-walking archived items
@@ -382,13 +445,31 @@ public static class YtDlpDownloader
             var embedExtras = pass < 3;
             var isPlaylistPace = usePlaylistItems && (playlistItems?.Count ?? 0) > 1;
 
+            Action<DownloadProgressUpdate> batchProgress = u =>
+            {
+                if (!string.IsNullOrWhiteSpace(u.CurrentTitle)) liveTitle = u.CurrentTitle;
+                if (u.CurrentIndex > 0) liveIndex = u.CurrentIndex;
+                // Re-emit with overall counts from archive.
+                Report(
+                    filePct: u.FilePercent,
+                    status: u.Status,
+                    isError: u.IsError,
+                    speed: u.SpeedBytesPerSec,
+                    eta: u.Eta,
+                    sizeInfo: u.SizeInfo,
+                    phase: u.Phase,
+                    itemKey: u.ItemKey,
+                    itemState: u.ItemState,
+                    currentTitle: u.CurrentTitle);
+            };
+
             try
             {
                 await RunWithAbortRetryAsync(
                     ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                     organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                     relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                    onLine, onProgress, permanentFailures, ct);
+                    onLine, batchProgress, permanentFailures, ct);
                 // If cookie args got disabled mid-run, keep local copy in sync for next pass.
                 cookieArgs = CookieManager.Resolve(cookiesFromBrowser);
             }
@@ -405,7 +486,7 @@ public static class YtDlpDownloader
                             ytDlpPath, ffmpegPath, url, playlistItems, format, videoQuality, audioQuality,
                             organizeInFolders, useSponsorBlock, isPlaylistPace, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, onProgress, permanentFailures, ct);
+                            onLine, batchProgress, permanentFailures, ct);
                     }
                     catch (InvalidOperationException ex2)
                     {
@@ -422,11 +503,21 @@ public static class YtDlpDownloader
             SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
             SyncSyntheticArchive(entries, ResolveScanRoot(destDir, fixedPlaylistFolder), archivePath);
 
+            // Refresh item states from archive.
+            foreach (var e in entries)
+            {
+                if (IsPermanent(e, permanentFailures))
+                    Report(itemKey: ItemKey(e), itemState: QueueItemState.Failed, currentTitle: e.Title);
+                else if (IsArchived(e, archivePath))
+                    Report(itemKey: ItemKey(e), itemState: QueueItemState.Done, currentTitle: e.Title);
+            }
+
             var missingAfter = CountMissing(entries, archivePath, permanentFailures);
             onLine($">> Pasada {pass} lista: {entries.Count - missingAfter - permanentFailures.Count}/{entries.Count} ok"
                 + (permanentFailures.Count > 0 ? $", {permanentFailures.Count} no disponibles" : "")
                 + (missingAfter > 0 ? $", {missingAfter} pendientes" : "")
                 + ".");
+            Report(status: $"Pasada {pass} lista · faltan {missingAfter}");
 
             if (missingAfter == 0) break;
             if (pass >= 2 && missingAfter >= missingBefore) break;
@@ -442,10 +533,16 @@ public static class YtDlpDownloader
             {
                 ct.ThrowIfCancellationRequested();
                 var entry = stillMissing[i];
-                onProgress((int)(100.0 * i / stillMissing.Count));
+                liveIndex = i + 1;
+                liveTitle = entry.Title;
+                Report(status: $"Uno por uno {i + 1}/{stillMissing.Count}", phase: "retry",
+                    itemKey: ItemKey(entry), itemState: QueueItemState.Downloading, currentTitle: entry.Title);
 
                 if (IsPermanent(entry, permanentFailures))
+                {
+                    Report(itemKey: ItemKey(entry), itemState: QueueItemState.Failed, currentTitle: entry.Title);
                     continue;
+                }
 
                 var directUrl = ResolveDirectUrl(entry, url);
                 // Prefer direct item URL when we have one; else playlist URL + single index.
@@ -459,6 +556,7 @@ public static class YtDlpDownloader
                     {
                         var wait = attempt * 5;
                         onLine($">>   reintento {attempt}/{MaxPerVideoAttempts} de \"{entry.Title}\" en {wait}s...");
+                        Report(status: $"Reintento {attempt}/{MaxPerVideoAttempts}: {entry.Title}", phase: "retry");
                         await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                     }
                     else
@@ -494,6 +592,20 @@ public static class YtDlpDownloader
                     var itemSponsor = useSponsorBlock
                         && (LooksLikeYoutubeUrl(attemptUrl) || IsYoutubeExtractor(entry.Extractor));
 
+                    Action<DownloadProgressUpdate> itemProgress = u =>
+                    {
+                        Report(
+                            filePct: u.FilePercent,
+                            status: u.Status ?? $"Descargando: {entry.Title}",
+                            speed: u.SpeedBytesPerSec,
+                            eta: u.Eta,
+                            sizeInfo: u.SizeInfo,
+                            phase: u.Phase,
+                            itemKey: ItemKey(entry),
+                            itemState: QueueItemState.Downloading,
+                            currentTitle: entry.Title);
+                    };
+
                     try
                     {
                         await RunWithAbortRetryAsync(
@@ -501,7 +613,7 @@ public static class YtDlpDownloader
                             format, videoQuality, audioQuality,
                             attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                             relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                            onLine, onProgress, permanentFailures, ct);
+                            onLine, itemProgress, permanentFailures, ct);
                     }
                     catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                     {
@@ -515,7 +627,7 @@ public static class YtDlpDownloader
                                 format, videoQuality, audioQuality,
                                 attemptOrganize, itemSponsor, isPlaylist: false, destDir, archivePath,
                                 relaxed, embedExtras, cookieArgs, fixedPlaylistFolder,
-                                onLine, onProgress, permanentFailures, ct);
+                                onLine, itemProgress, permanentFailures, ct);
                         }
                         catch (InvalidOperationException ex2)
                         {
@@ -532,13 +644,21 @@ public static class YtDlpDownloader
                 }
 
                 if (!ok)
+                {
                     onLine($">>   NO se pudo descargar: {entry.Title}");
+                    Report(itemKey: ItemKey(entry), itemState: QueueItemState.Failed, currentTitle: entry.Title,
+                        status: $"Error: {entry.Title}", isError: true);
+                }
                 else
+                {
                     onLine($">>   OK: {entry.Title}");
+                    Report(itemKey: ItemKey(entry), itemState: QueueItemState.Done, currentTitle: entry.Title,
+                        status: $"OK: {entry.Title}");
+                }
             }
         }
 
-        onProgress(100);
+        Report(status: "Finalizando...");
         // Source of truth: anything not in the archive (and not successfully synced) failed.
         var totalFailed = entries.Count(e => !IsArchived(e, archivePath));
 
@@ -762,12 +882,15 @@ public static class YtDlpDownloader
         return null;
     }
 
+    public static string ItemKey(PlaylistEntry e) =>
+        !string.IsNullOrWhiteSpace(e.Id) ? e.Id : $"idx:{e.Index}";
+
     private static async Task<int> RunWithAbortRetryAsync(
         string ytDlpPath, string ffmpegPath, string url, List<int>? playlistItems,
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
-        Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
         CancellationToken ct)
     {
         for (var attempt = 1; ; attempt++)
@@ -786,6 +909,12 @@ public static class YtDlpDownloader
             {
                 var waitSecs = attempt * 12;
                 onLine($">> Conexion cortada (posible rate-limit del sitio). Reintentando en {waitSecs}s... ({attempt}/{MaxAbortRetries})");
+                onProgress(new DownloadProgressUpdate
+                {
+                    Status = $"Conexion cortada; reintento en {waitSecs}s...",
+                    Phase = "retry",
+                    IsError = true,
+                });
                 await Task.Delay(TimeSpan.FromSeconds(waitSecs), ct);
             }
         }
@@ -796,7 +925,7 @@ public static class YtDlpDownloader
         string format, string videoQuality, string audioQuality, bool organizeInFolders,
         bool sponsorBlock, bool isPlaylist, string destDir, string archivePath,
         bool relaxed, bool embedExtras, CookieArgs cookies, string? fixedPlaylistFolder,
-        Action<string> onLine, Action<int> onProgress, HashSet<string> permanentFailures,
+        Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanentFailures,
         Action<int> onExitCode, CancellationToken ct)
     {
         var extraArgs = new List<string>();
@@ -901,17 +1030,96 @@ public static class YtDlpDownloader
             if (CookieManager.IsCookieFailureText(line))
                 cookieFailSeen = true;
 
-            var pm = ProgressRegex.Match(line);
-            if (pm.Success
-                && double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var pct))
+            var dest = DestinationRegex.Match(line);
+            if (dest.Success)
             {
-                onProgress((int)pct);
+                var name = Path.GetFileName(dest.Groups[1].Value.Trim().Trim('"'));
+                onProgress(new DownloadProgressUpdate
+                {
+                    CurrentTitle = name,
+                    Status = "Descargando archivo...",
+                    Phase = "download",
+                    ItemState = QueueItemState.Downloading,
+                });
+            }
+
+            var detail = ProgressDetailRegex.Match(line);
+            if (detail.Success
+                && double.TryParse(detail.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var pctDetail))
+            {
+                double? speed = detail.Groups[3].Success
+                    ? DownloadProgressUpdate.ParseRateToBytes(detail.Groups[3].Value)
+                    : null;
+                TimeSpan? eta = detail.Groups[4].Success
+                    ? DownloadProgressUpdate.ParseEta(detail.Groups[4].Value)
+                    : null;
+                var sizeInfo = detail.Groups[2].Success ? detail.Groups[2].Value : null;
+                onProgress(new DownloadProgressUpdate
+                {
+                    FilePercent = (int)pctDetail,
+                    OverallPercent = (int)pctDetail,
+                    SpeedBytesPerSec = speed,
+                    Eta = eta,
+                    SizeInfo = sizeInfo,
+                    Status = $"Descargando… {(int)pctDetail}%",
+                    Phase = "download",
+                });
+            }
+            else
+            {
+                var pm = ProgressRegex.Match(line);
+                if (pm.Success
+                    && double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var pct))
+                {
+                    onProgress(new DownloadProgressUpdate
+                    {
+                        FilePercent = (int)pct,
+                        OverallPercent = (int)pct,
+                        Status = $"Descargando… {(int)pct}%",
+                        Phase = "download",
+                    });
+                }
             }
 
             var im = ItemRegex.Match(line);
             if (im.Success)
+            {
                 onLine($">> Item {im.Groups[1].Value} de {im.Groups[2].Value}");
+                if (int.TryParse(im.Groups[1].Value, out var n)
+                    && int.TryParse(im.Groups[2].Value, out var m))
+                {
+                    onProgress(new DownloadProgressUpdate
+                    {
+                        CurrentIndex = n,
+                        Total = m,
+                        Status = $"Item {n} de {m}",
+                        Phase = "download",
+                        ItemState = QueueItemState.Downloading,
+                    });
+                }
+            }
+
+            if (line.Contains("[Merger]", StringComparison.Ordinal)
+                || line.Contains("Merging formats", StringComparison.OrdinalIgnoreCase))
+            {
+                onProgress(new DownloadProgressUpdate
+                {
+                    FilePercent = 100,
+                    Status = "Uniendo video + audio...",
+                    Phase = "merge",
+                });
+            }
+            else if (line.Contains("[ExtractAudio]", StringComparison.Ordinal)
+                     || line.Contains("Extracting audio", StringComparison.OrdinalIgnoreCase))
+            {
+                onProgress(new DownloadProgressUpdate
+                {
+                    Status = "Extrayendo audio...",
+                    Phase = "extract",
+                });
+            }
 
             // Only track real extractor ids — never the "Downloading item N of M" number.
             var em = ExtractorIdRegex.Match(line);
@@ -928,6 +1136,14 @@ public static class YtDlpDownloader
                 if (!string.IsNullOrEmpty(id) && id.Length >= 3 && !IsLikelyItemCounter(id))
                     permanentFailures.Add(id);
                 onLine($">>   (no disponible, no se reintentara): {Truncate(line, 160)}");
+                onProgress(new DownloadProgressUpdate
+                {
+                    Status = Truncate(line, 120),
+                    IsError = true,
+                    ItemKey = id,
+                    ItemState = QueueItemState.Failed,
+                    Phase = "error",
+                });
                 return;
             }
 
