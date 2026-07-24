@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.25**
+**Versión actual: 1.3.26** (Android: v1.0.9)
 
 ## Requisitos
 
@@ -90,6 +90,13 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.26
+- Release combinada Desktop + Android en un solo lugar (sin cambios de codigo en desktop en
+  esta version). Ver `Android/README.md` para el changelog de Android (1.0.7-1.0.9: skip de
+  ya descargados, motivo real de error por item, ETA + 2da pasada de reintento, barra de
+  progreso general, cookies para sitios con login/edad, soporte generico a cualquier sitio
+  de yt-dlp)
 
 ### 1.3.25
 - spotDL: "Analizar" ahora tiene un timeout de 30s en vez de colgarse 1-2+ minutos en silencio

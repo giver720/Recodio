@@ -21,7 +21,7 @@ data class QueueItem(
 )
 data class PlaylistEntry(val index: Int, val title: String, var selected: Boolean = true)
 
-enum class ItemStatus { QUEUED, DOWNLOADING, DONE, ERROR }
+enum class ItemStatus { QUEUED, DOWNLOADING, DONE, SKIPPED, ERROR }
 
 // Per-item visual state for the download list. A plain data class wouldn't do - Compose only
 // recomposes readers when the STATE OBJECT they read changes, and a `var` on a data class
@@ -30,6 +30,9 @@ enum class ItemStatus { QUEUED, DOWNLOADING, DONE, ERROR }
 class DownloadItemUi(val label: String) {
     var status by mutableStateOf(ItemStatus.QUEUED)
     var progress by mutableStateOf(0f)
+    // Last "ERROR:" line yt-dlp printed for this item, same idea as desktop's lastErrorText -
+    // null unless status == ERROR, shown to the user on tap so "Error" isn't a dead end.
+    var errorDetail by mutableStateOf<String?>(null)
 }
 
 // Single source of truth shared between the Compose UI and the foreground Service. Compose
@@ -48,6 +51,10 @@ object DownloadState {
     // Non-null = ruta absoluta elegida por el usuario, ya traducida desde la SAF tree URI.
     var downloadDirPath by mutableStateOf<String?>(null)
 
+    // Mirrors CookiesPrefs.hasCookies(context) - kept as state so the UI recomposes right after
+    // an import/removal instead of needing to re-check the filesystem.
+    var hasCookies by mutableStateOf(false)
+
     val queue = mutableStateListOf<QueueItem>()
 
     // Built fresh at the start of each runQueue() run - one entry per item actually being
@@ -61,14 +68,20 @@ object DownloadState {
 
     var running by mutableStateOf(false)
     var status by mutableStateOf("Listo.")
-    var progress by mutableStateOf(0f)
-    var log by mutableStateOf("")
 
-    fun appendLog(line: String) {
-        val next = log + line + "\n"
-        // Bounded so a long playlist doesn't grow this into a multi-MB string.
-        log = if (next.length > 40_000) next.takeLast(30_000) else next
-    }
+    // Overall queue progress (0..1), combining completed items + the live fraction of whatever
+    // item is downloading right now - drives the single progress bar shown next to the queue,
+    // which replaced the raw text log.
+    var progress by mutableStateOf(0f)
+
+    // Retry-pass indicator, mirrors desktop's "pasada X/Y" - only shown once a 2nd pass over
+    // failed items actually starts, so a normal single-pass run never mentions it.
+    var passIndex by mutableStateOf(1)
+    var passTotal by mutableStateOf(1)
+
+    // Projected time remaining for the whole queue, recomputed after each item finishes from
+    // the running average seconds/item - null until at least one item has completed.
+    var etaText by mutableStateOf<String?>(null)
 
     fun resetAnalysis() {
         analyzedEntries.clear()

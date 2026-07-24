@@ -9,10 +9,10 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,10 +55,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -89,6 +87,31 @@ class MainActivity : ComponentActivity() {
             DownloadDirPrefs.save(this, path)
         }
 
+    private val cookiesPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            if (uri == null) return@registerForActivityResult
+            try {
+                contentResolver.openInputStream(uri)?.use { CookiesPrefs.importFrom(this, it) }
+                DownloadState.hasCookies = CookiesPrefs.hasCookies(this)
+                DownloadState.status = if (DownloadState.hasCookies)
+                    "Cookies importadas." else "No se pudo leer el archivo de cookies."
+            } catch (e: Exception) {
+                DownloadState.status = "No se pudo importar cookies.txt: ${e.message}"
+            }
+        }
+
+    fun pickCookiesFile() {
+        // text/plain covers a real cookies.txt export; "*/*" as a fallback since some browser
+        // extensions save it without a recognized MIME type.
+        cookiesPickerLauncher.launch(arrayOf("text/plain", "*/*"))
+    }
+
+    fun clearCookies() {
+        CookiesPrefs.clear(this)
+        DownloadState.hasCookies = false
+        DownloadState.status = "Cookies eliminadas."
+    }
+
     fun pickDownloadFolder() {
         if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
             val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
@@ -111,6 +134,7 @@ class MainActivity : ComponentActivity() {
         }
 
         DownloadState.downloadDirPath = DownloadDirPrefs.load(this)
+        DownloadState.hasCookies = CookiesPrefs.hasCookies(this)
         updateCheckScope.launch { AppUpdateChecker.checkIfDue(this@MainActivity) }
 
         setContent {
@@ -178,7 +202,7 @@ fun RecodioScreen() {
             OutlinedTextField(
                 value = s.url,
                 onValueChange = { s.url = it },
-                label = { Text("URL de YouTube (video o playlist)") },
+                label = { Text("URL (YouTube, TikTok, Instagram, X, SoundCloud, Vimeo...)") },
                 singleLine = true,
                 enabled = !s.running && !s.analyzing,
                 modifier = Modifier.fillMaxWidth()
@@ -256,6 +280,23 @@ fun RecodioScreen() {
                 }
             }
 
+            Text(
+                "Cookies (sitios con login o edad restringida):",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                if (s.hasCookies) "Cookies cargadas" else "Sin cookies - Instagram, X y videos con edad restringida las necesitan",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { activity.pickCookiesFile() }, enabled = !s.running) {
+                    Text(if (s.hasCookies) "Reemplazar cookies.txt" else "Importar cookies.txt")
+                }
+                if (s.hasCookies) {
+                    TextButton(onClick = { activity.clearCookies() }, enabled = !s.running) { Text("Quitar") }
+                }
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected = s.audioOnly, onClick = { s.audioOnly = true }, label = { Text("MP3") }, enabled = !s.running)
                 FilterChip(selected = !s.audioOnly, onClick = { s.audioOnly = false }, label = { Text("MP4") }, enabled = !s.running)
@@ -280,38 +321,33 @@ fun RecodioScreen() {
                 }
             }
 
-            Text(s.status, style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(s.status, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                if (s.passTotal > 1) {
+                    Text(
+                        "pasada ${s.passIndex}/${s.passTotal}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+            }
+
+            if (s.running || s.downloadItems.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LinearProgressIndicator(
+                        progress = { s.progress },
+                        modifier = Modifier.weight(1f).height(6.dp)
+                    )
+                    Text("${(s.progress * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                }
+                s.etaText?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline) }
+            }
 
             if (s.downloadItems.isNotEmpty()) {
                 Text("Descargas:", style = MaterialTheme.typography.bodySmall)
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     s.downloadItems.forEach { item -> DownloadItemRow(item) }
                 }
-            }
-
-            var showLog by remember { mutableStateOf(false) }
-            TextButton(onClick = { showLog = !showLog }) { Text(if (showLog) "Ocultar log" else "Ver log") }
-            if (showLog) {
-                // The system back gesture/button should close the log instead of doing nothing -
-                // without this the only way out is finding the small toggle button again, which
-                // feels "stuck" since swiping back (the instinctive Android gesture) does nothing.
-                BackHandler { showLog = false }
-
-                // Its own bounded scroll state, separate from the page's - otherwise every new
-                // log line (which arrives continuously while downloading) auto-scrolls the WHOLE
-                // page to the bottom, dragging the user past the "Ocultar log" button and making
-                // it feel impossible to get back out.
-                val logScroll = rememberScrollState()
-                LaunchedEffect(s.log) { logScroll.scrollTo(logScroll.maxValue) }
-                Text(
-                    s.log.ifEmpty { "(sin actividad todavia)" },
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(220.dp)
-                        .verticalScroll(logScroll)
-                )
             }
         }
     }
@@ -323,13 +359,29 @@ private fun DownloadItemRow(item: DownloadItemUi) {
         ItemStatus.QUEUED -> MaterialTheme.colorScheme.outline to "En cola"
         ItemStatus.DOWNLOADING -> MaterialTheme.colorScheme.primary to "${(item.progress * 100).toInt()}%"
         ItemStatus.DONE -> Color(0xFF4CAF50) to "Listo"
+        ItemStatus.SKIPPED -> MaterialTheme.colorScheme.outline to "Omitido"
         ItemStatus.ERROR -> MaterialTheme.colorScheme.error to "Error"
+    }
+    var showError by remember { mutableStateOf(false) }
+    if (showError && item.errorDetail != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showError = false },
+            confirmButton = { TextButton(onClick = { showError = false }) { Text("Cerrar") } },
+            title = { Text(item.label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = { Text(item.errorDetail ?: "", style = MaterialTheme.typography.bodySmall) }
+        )
     }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (item.status == ItemStatus.ERROR && item.errorDetail != null)
+                    Modifier.clickable { showError = true }
+                else Modifier
+            )
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -357,6 +409,14 @@ private fun DownloadItemRow(item: DownloadItemUi) {
                         .fillMaxWidth()
                         .padding(top = 4.dp)
                         .height(3.dp)
+                )
+            }
+            if (item.status == ItemStatus.ERROR && item.errorDetail != null) {
+                Text(
+                    "Toca para ver el motivo",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
