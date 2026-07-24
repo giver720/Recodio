@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.22**
+**Versión actual: 1.3.23**
 
 ## Requisitos
 
@@ -90,6 +90,12 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.23
+- Barra de progreso: cola con colores por estado (verde/rojo/gris/azul) en vez de solo texto plano
+- Tooltip al pasar el mouse sobre un item fallido con el motivo real del error (yt-dlp y spotDL)
+- ETA proyectada para toda la cola (no solo el archivo en curso)
+- Se muestra la pasada de reintento actual ("pasada 2/2") en el panel, no solo en el log
 
 ### 1.3.22
 - yt-dlp: fix real de "toda descarga termina en error" — `--no-write-all-thumbnails` no es una opcion valida de yt-dlp; el proceso rechazaba el comando completo antes de descargar nada

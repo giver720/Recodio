@@ -23,6 +23,9 @@ public sealed class DownloadProgressPanel
     private readonly List<ProgressQueueItem> _items = [];
     private readonly Dictionary<string, int> _keyToIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly System.Windows.Forms.Timer _elapsedTimer;
+    private readonly ToolTip _itemTip = new() { AutoPopDelay = 8000, InitialDelay = 300, ReshowDelay = 100 };
+    private readonly Font _boldQueueFont;
+    private int _lastTipIndex = -1;
     private DateTime? _startedAt;
     private string? _folderPath;
     private int _overallPct;
@@ -136,6 +139,8 @@ public sealed class DownloadProgressPanel
         };
         Host.Controls.Add(StatusLabel);
 
+        _boldQueueFont = new Font(parent.Font, FontStyle.Bold);
+
         QueueList = new ListBox
         {
             Location = new Point(0, 110),
@@ -144,6 +149,16 @@ public sealed class DownloadProgressPanel
             IntegralHeight = false,
             HorizontalScrollbar = true,
             BorderStyle = BorderStyle.FixedSingle,
+            DrawMode = DrawMode.OwnerDrawFixed,
+            ItemHeight = Math.Max(15, parent.Font.Height + 4),
+        };
+        QueueList.DrawItem += QueueList_DrawItem;
+        // Hover tooltip: shows the last error line for a failed item without digging in the log.
+        QueueList.MouseMove += QueueList_MouseMove;
+        QueueList.MouseLeave += (_, _) =>
+        {
+            _itemTip.Hide(QueueList);
+            _lastTipIndex = -1;
         };
         Host.Controls.Add(QueueList);
 
@@ -379,6 +394,28 @@ public sealed class DownloadProgressPanel
                 && (u.BatchTotal != u.Total || u.BatchIndex != selPos))
                 stats += $" · lote {u.BatchIndex}/{u.BatchTotal}";
 
+            // Which full retry pass ("Barrido"/"Pasada") this is, when there's more than one.
+            if (u.PassTotal > 1)
+                stats += $" · pasada {Math.Max(1, u.PassIndex)}/{u.PassTotal}";
+
+            // Whole-queue ETA: average wall-clock time per finished item (done+failed - skips
+            // are near-instant and would skew the average) projected over what's left.
+            if (_startedAt is { } startedAt && pending > 0)
+            {
+                var consumed = u.Done + u.Failed;
+                if (consumed > 0)
+                {
+                    var perItem = (DateTime.Now - startedAt).TotalSeconds / consumed;
+                    var etaSecs = perItem * pending;
+                    if (etaSecs is > 0 and < 100_000)
+                    {
+                        var etaText = DownloadProgressUpdate.FormatEta(TimeSpan.FromSeconds(etaSecs));
+                        if (!string.IsNullOrEmpty(etaText))
+                            stats += $" · ETA total {etaText}";
+                    }
+                }
+            }
+
             StatsLabel.Text = stats;
         }
         else
@@ -426,7 +463,8 @@ public sealed class DownloadProgressPanel
             SetStatus(u.Status!, u.IsError);
 
         if (!string.IsNullOrEmpty(u.ItemKey) && u.ItemState is { } st)
-            SetItemState(u.ItemKey, st, u.CurrentTitle);
+            SetItemState(u.ItemKey, st, u.CurrentTitle,
+                errorDetail: st == QueueItemState.Failed ? u.Status : null);
     }
 
     public void ClearQueue()
@@ -434,6 +472,8 @@ public sealed class DownloadProgressPanel
         _items.Clear();
         _keyToIndex.Clear();
         QueueList.Items.Clear();
+        _itemTip.Hide(QueueList);
+        _lastTipIndex = -1;
     }
 
     public void SetQueueItems(IEnumerable<ProgressQueueItem> items)
@@ -447,7 +487,7 @@ public sealed class DownloadProgressPanel
         }
     }
 
-    public void SetItemState(string key, QueueItemState state, string? title = null)
+    public void SetItemState(string key, QueueItemState state, string? title = null, string? errorDetail = null)
     {
         if (!_keyToIndex.TryGetValue(key, out var idx) || idx < 0 || idx >= _items.Count)
         {
@@ -482,6 +522,9 @@ public sealed class DownloadProgressPanel
             && !title.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
             && title.Length < 200)
             it.Title = title!;
+        if (state == QueueItemState.Failed && !string.IsNullOrWhiteSpace(errorDetail))
+            it.ErrorDetail = errorDetail;
+        // Owner-draw ListBox redraws the row when its backing item is replaced.
         QueueList.Items[idx] = it.DisplayText;
         if (state == QueueItemState.Downloading)
         {
@@ -498,6 +541,47 @@ public sealed class DownloadProgressPanel
     }
 
     public IReadOnlyList<ProgressQueueItem> Items => _items;
+
+    // Color-codes each queue row by state so a 20+ item playlist is scannable at a glance
+    // instead of relying only on the ▶✓⏭✗ text glyph.
+    private void QueueList_DrawItem(object? sender, DrawItemEventArgs e)
+    {
+        e.DrawBackground();
+        if (e.Index >= 0 && e.Index < _items.Count)
+        {
+            var item = _items[e.Index];
+            var color = item.State switch
+            {
+                QueueItemState.Done => Color.ForestGreen,
+                QueueItemState.Failed => Color.Firebrick,
+                QueueItemState.Skipped => SystemColors.GrayText,
+                QueueItemState.Downloading => Color.RoyalBlue,
+                _ => e.ForeColor,
+            };
+            var font = item.State == QueueItemState.Downloading ? _boldQueueFont : e.Font ?? QueueList.Font;
+            TextRenderer.DrawText(e.Graphics, item.DisplayText, font, e.Bounds, color,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                | TextFormatFlags.NoPrefix);
+        }
+        e.DrawFocusRectangle();
+    }
+
+    private void QueueList_MouseMove(object? sender, MouseEventArgs e)
+    {
+        var idx = QueueList.IndexFromPoint(e.Location);
+        if (idx == _lastTipIndex) return;
+        _lastTipIndex = idx;
+        if (idx < 0 || idx >= _items.Count)
+        {
+            _itemTip.Hide(QueueList);
+            return;
+        }
+        var it = _items[idx];
+        if (it.State == QueueItemState.Failed && !string.IsNullOrWhiteSpace(it.ErrorDetail))
+            _itemTip.Show(it.ErrorDetail, QueueList, e.X + 12, e.Y + 12, 6000);
+        else
+            _itemTip.Hide(QueueList);
+    }
 
     private void RefreshElapsed()
     {

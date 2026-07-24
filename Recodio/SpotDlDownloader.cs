@@ -187,6 +187,8 @@ public static class SpotDlDownloader
         HashSet<string>? archiveCache = null;
         int batchIndex = 0;
         int batchTotal = 0;
+        int passIndex = 1;
+        int passTotal = 1;
 
         int TotalKnown() => knownTracks?.Count ?? 0;
 
@@ -249,6 +251,8 @@ public static class SpotDlDownloader
                 CurrentIndex = selPos,
                 BatchIndex = batchIndex,
                 BatchTotal = batchTotal,
+                PassIndex = passIndex,
+                PassTotal = passTotal,
                 Status = status,
                 IsError = isError,
                 CurrentTitle = liveTitle,
@@ -343,10 +347,12 @@ public static class SpotDlDownloader
         }
 
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
+        passTotal = MaxBatchPasses;
 
         // ----- Phase A: batch passes (archive skips finished tracks when skipExisting) -----
         for (var pass = 1; pass <= MaxBatchPasses; pass++)
         {
+            passIndex = pass;
             ct.ThrowIfCancellationRequested();
 
             if (knownTracks != null)
@@ -547,6 +553,9 @@ public static class SpotDlDownloader
             }
 
             var ok = false;
+            // Captures the real reason so the final Failed report can show something useful
+            // in the queue tooltip instead of just restating the track label.
+            string? lastErrorText = null;
             for (var attempt = 1; attempt <= MaxPerTrackAttempts && !ok; attempt++)
             {
                 if (attempt > 1)
@@ -590,12 +599,14 @@ public static class SpotDlDownloader
                     }
                     catch (InvalidOperationException ex2)
                     {
+                        lastErrorText = ex2.Message;
                         onLine($">>   fallo: {ex2.Message}");
                         ok = ArchiveContains(archivePath, url);
                     }
                 }
                 catch (InvalidOperationException ex)
                 {
+                    lastErrorText = ex.Message;
                     onLine($">>   fallo: {ex.Message}");
                     ok = ArchiveContains(archivePath, url);
                 }
@@ -605,8 +616,11 @@ public static class SpotDlDownloader
             {
                 remainingFails++;
                 onLine($">>   NO se pudo: {url}");
-                Report(i + 1, stillMissing.Count, status: $"Error: {label}", isError: true,
-                    itemKey: url, itemState: QueueItemState.Failed, currentTitle: label);
+                var errStatus = !string.IsNullOrWhiteSpace(lastErrorText)
+                    ? (lastErrorText!.Length > 120 ? lastErrorText[..117] + "..." : lastErrorText)
+                    : $"Error: {label}";
+                Report(i + 1, stillMissing.Count, status: errStatus,
+                    isError: true, itemKey: url, itemState: QueueItemState.Failed, currentTitle: label);
             }
             else
             {

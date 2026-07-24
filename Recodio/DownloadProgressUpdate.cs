@@ -30,6 +30,10 @@ public sealed record DownloadProgressUpdate
     public int BatchIndex { get; init; }
     public int BatchTotal { get; init; }
 
+    /// <summary>Which full retry pass ("Barrido"/"Pasada") is currently running, if &gt; 1 total.</summary>
+    public int PassIndex { get; init; }
+    public int PassTotal { get; init; }
+
     public string? CurrentTitle { get; init; }
     public string Phase { get; init; } = "";
     public double? SpeedBytesPerSec { get; init; }
@@ -136,6 +140,9 @@ public sealed class ProgressQueueItem
     public string Key { get; }
     public string Title { get; set; }
     public QueueItemState State { get; set; }
+
+    /// <summary>Last error line seen for this item, if State == Failed. Shown on hover.</summary>
+    public string? ErrorDetail { get; set; }
 
     public ProgressQueueItem(string key, string title, QueueItemState state = QueueItemState.Pending)
     {

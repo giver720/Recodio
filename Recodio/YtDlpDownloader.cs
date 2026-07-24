@@ -334,6 +334,8 @@ public static class YtDlpDownloader
         string? liveTitle = null;
         int batchIndex = 0;
         int batchTotal = 0;
+        int sweepIndex = 1;
+        int sweepTotal = 1;
         var permanentFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // Only mark permanent when the error id belongs to this selection.
         var selectionIds = new HashSet<string>(
@@ -403,6 +405,8 @@ public static class YtDlpDownloader
                 CurrentIndex = selPos,
                 BatchIndex = batchIndex,
                 BatchTotal = batchTotal,
+                PassIndex = sweepIndex,
+                PassTotal = sweepTotal,
                 CurrentTitle = liveTitle,
                 Status = status,
                 IsError = isError,
@@ -502,9 +506,11 @@ public static class YtDlpDownloader
         // BatchPasses: how many full sweeps over remaining items (1–4). Prefer per-item
         // direct URLs so playlists finish predictably (no multi-hour playlist re-walk + sleeps).
         var sweeps = Math.Max(1, policy.BatchPasses);
+        sweepTotal = sweeps;
 
         for (var sweep = 1; sweep <= sweeps; sweep++)
         {
+            sweepIndex = sweep;
             ct.ThrowIfCancellationRequested();
             SeedArchiveFromFolder(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
             PruneStaleArchiveEntries(entries, destDir, fixedPlaylistFolder, archivePath, onLine: null);
@@ -555,6 +561,11 @@ public static class YtDlpDownloader
                     itemKey: ItemKey(entry), itemState: QueueItemState.Downloading, currentTitle: entry.Title);
                 onLine($">> [{i + 1}/{missing.Count}] {entry.Title}");
 
+                // Captures the real reason ("Video unavailable", "HTTP 403", …) so the final
+                // Failed report below can show something useful in the queue tooltip instead of
+                // just restating the title.
+                string? lastErrorText = null;
+
                 var ok = await DownloadOneEntryAsync(
                     ytDlpPath, ffmpegPath, url, entry, usePlaylistItems,
                     format, videoQuality, audioQuality, organizeInFolders, useSponsorBlock,
@@ -563,6 +574,8 @@ public static class YtDlpDownloader
                     u =>
                     {
                         InvalidateArchiveCache();
+                        if (u.IsError && !string.IsNullOrWhiteSpace(u.Status))
+                            lastErrorText = u.Status;
                         Report(
                             filePct: u.FilePercent,
                             status: u.Status ?? $"Descargando: {entry.Title}",
@@ -591,7 +604,7 @@ public static class YtDlpDownloader
                         permanentFailures.Add(k);
                     onLine($">>   NO se pudo: {entry.Title}");
                     Report(itemKey: ItemKey(entry), itemState: QueueItemState.Failed, currentTitle: entry.Title,
-                        status: $"Error: {entry.Title}", isError: true);
+                        status: lastErrorText ?? $"Error: {entry.Title}", isError: true);
                 }
                 else
                 {
