@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.24**
+**Versión actual: 1.3.25**
 
 ## Requisitos
 
@@ -91,8 +91,19 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 
 ## Changelog resumido
 
+### 1.3.25
+- spotDL: "Analizar" ahora tiene un timeout de 30s en vez de colgarse 1-2+ minutos en silencio
+  cuando Spotify no responde (confirmado: 429/403 tardan lo mismo que un pedido exitoso porque
+  spotDL reintenta internamente sin loguear nada). Muestra un mensaje claro y accionable en vez
+  de quedarse pegado.
+- Correccion al changelog de 1.3.24: la app propia de Spotify **si requiere** que la cuenta
+  dueña tenga Premium (lo confirma el propio error 403 de Spotify: "Active premium subscription
+  required for the owner of the app"). Sin Premium, la app propia no sirve — queda como fallback
+  la app compartida de spotDL, ahora con el timeout de arriba en vez de colgarse.
+
 ### 1.3.24
-- spotDL: soporte para app de Spotify propia (Client ID/Secret en Configuracion, opcional, gratis, sin Premium)
+- spotDL: soporte para app de Spotify propia (Client ID/Secret en Configuracion, opcional, gratis
+  para crear — pero ver nota de la 1.3.25 sobre el requisito de Premium para poder usarla)
 - Arregla que "Analizar" en spotDL tardara 1-2+ minutos por cancion: la app compartida de spotDL
   esta rate-limiteada por Spotify (24hs) por el uso global de todo el mundo; una app propia tiene
   su propia cuota privada

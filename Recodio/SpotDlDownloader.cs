@@ -96,6 +96,38 @@ public static class SpotDlDownloader
         psi.ArgumentList.Add(clientSecret.Trim());
     }
 
+    // When the Spotify Web API request behind spotDL fails (global rate-limit on the shared
+    // default app, or a 403 on a misconfigured personal app), spotDL retries silently with no
+    // log output for 1-2+ MINUTES before giving up - confirmed by timing it directly (2m19s-
+    // 2m23s for a single track, both for a 429 and a 403). A real successful call takes ~1-2s.
+    // 30s is generous headroom over that while cutting the wait by roughly 75x on the failure
+    // path, and turning a silent hang into an honest, actionable message.
+    private const int SpotifyTimeoutSeconds = 30;
+
+    /// <summary>
+    /// Runs a spotDL invocation with a hard timeout on top of the caller's cancellation token.
+    /// Distinguishes "user cancelled" (rethrown as-is) from "we gave up waiting on Spotify"
+    /// (thrown as a friendly InvalidOperationException instead of looking like a hang).
+    /// </summary>
+    private static async Task RunSpotifyBoundedAsync(Func<CancellationToken, Task> action, CancellationToken ct)
+    {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(SpotifyTimeoutSeconds));
+        try
+        {
+            await action(timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"Spotify no respondio en {SpotifyTimeoutSeconds}s. Lo mas probable es que la app "
+                + "compartida de spotDL este con rate-limit global en este momento (le pasa a todos "
+                + "los usuarios de spotDL, no es algo de tu conexion). Proba de nuevo en unos minutos, "
+                + "o configura tu propia app de Spotify en Configuracion (necesita que la cuenta "
+                + "dueña tenga Premium).");
+        }
+    }
+
     public static async Task<SpotDlAnalyzeResult> AnalyzeAsync(
         string spotdlPath, string query, CancellationToken ct,
         string? spotifyClientId = null, string? spotifyClientSecret = null)
@@ -120,8 +152,10 @@ public static class SpotDlDownloader
             psi.ArgumentList.Add("save");
             psi.ArgumentList.Add(query);
 
-            await ProcessRunner.RunAsync(psi, _ => { /* quiet analyze */ },
-                code => $"spotdl save termino con codigo {code}", ct);
+            await RunSpotifyBoundedAsync(
+                innerCt => ProcessRunner.RunAsync(psi, _ => { /* quiet analyze */ },
+                    code => $"spotdl save termino con codigo {code}", innerCt),
+                ct);
 
             if (!File.Exists(savePath))
                 throw new InvalidOperationException("spotDL no genero el archivo de preview.");
