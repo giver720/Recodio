@@ -593,7 +593,8 @@ public class SpotDlForm : Form
         _analyzeCts = new CancellationTokenSource();
         try
         {
-            var result = await SpotDlDownloader.AnalyzeAsync(_spotdlPath, query, _analyzeCts.Token);
+            var result = await SpotDlDownloader.AnalyzeAsync(_spotdlPath, query, _analyzeCts.Token,
+                _config.SpotifyClientId, _config.SpotifyClientSecret);
             _tracks = result.Tracks;
             var dest = _txtDest.Text.Trim();
             foreach (var t in _tracks)
@@ -798,7 +799,8 @@ public class SpotDlForm : Form
                         catch { /* dispose race */ }
                     },
                     _cts.Token,
-                    knownTracksMeta: meta);
+                    knownTracksMeta: meta,
+                    spotifyClientId: _config.SpotifyClientId, spotifyClientSecret: _config.SpotifyClientSecret);
 
                 // Prefer live progress totals over failCount guesses
                 var completedOk = lastTotal > 0

@@ -13,6 +13,8 @@ public class SettingsForm : Form
     private readonly ComboBox _cmbOnExists;
     private readonly CheckBox _chkClipboard;
     private readonly ComboBox _cmbCookies;
+    private readonly TextBox _txtSpotifyClientId;
+    private readonly TextBox _txtSpotifyClientSecret;
 
     public string WatchDir => _txtWatch.Text.Trim();
     public string OutputDir => _chkSameFolder.Checked ? "" : _txtOut.Text.Trim();
@@ -38,6 +40,8 @@ public class SettingsForm : Form
     };
     public bool ClipboardAutoFill => _chkClipboard.Checked;
     public string CookiesBrowser => BrowserCookies.KeyAt(_cmbCookies.SelectedIndex);
+    public string SpotifyClientId => _txtSpotifyClientId.Text.Trim();
+    public string SpotifyClientSecret => _txtSpotifyClientSecret.Text.Trim();
 
     /// <summary>Optional gate for app self-update (e.g. block while downloads run).</summary>
     [System.ComponentModel.Browsable(false)]
@@ -244,6 +248,74 @@ public class SettingsForm : Form
             }
         };
         Controls.Add(btnOpenCookiesDir);
+        y += 28;
+
+        // spotDL's built-in Spotify app is shared by every spotDL install worldwide and gets
+        // rate-limited by Spotify for hours under global load (seen: 24h Retry-After) - that's
+        // what makes "Analizar" in spotDL feel hung. A personal app fixes it with a private
+        // quota. Free, no Premium, no personal login - just an app-level Client ID/Secret.
+        var lblSpotifyApp = new Label
+        {
+            Text = "App de Spotify propia (opcional, arregla las esperas largas en spotDL):",
+            Location = new Point(10, y),
+            AutoSize = true,
+        };
+        Controls.Add(lblSpotifyApp);
+        y += 20;
+
+        var linkSpotifyDash = new LinkLabel
+        {
+            Text = "Crear gratis en developer.spotify.com/dashboard (no hace falta Premium)",
+            Location = new Point(10, y),
+            AutoSize = true,
+        };
+        linkSpotifyDash.Click += (_, _) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "https://developer.spotify.com/dashboard")
+                { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Recodio");
+            }
+        };
+        Controls.Add(linkSpotifyDash);
+        y += 24;
+
+        Controls.Add(new Label { Text = "Client ID:", Location = new Point(10, y), AutoSize = true });
+        y += 18;
+        _txtSpotifyClientId = new TextBox
+        {
+            Text = config.SpotifyClientId,
+            Location = new Point(10, y),
+            Size = new Size(440, 20),
+        };
+        Controls.Add(_txtSpotifyClientId);
+        y += 26;
+
+        Controls.Add(new Label { Text = "Client Secret:", Location = new Point(10, y), AutoSize = true });
+        y += 18;
+        _txtSpotifyClientSecret = new TextBox
+        {
+            Text = config.SpotifyClientSecret,
+            Location = new Point(10, y),
+            Size = new Size(440, 20),
+            UseSystemPasswordChar = true,
+        };
+        Controls.Add(_txtSpotifyClientSecret);
+        y += 24;
+
+        var lblSpotifyHint = new Label
+        {
+            Text = "Vacio = usa la app compartida de spotDL (puede tardar o fallar si esta saturada).",
+            Location = new Point(10, y),
+            Size = new Size(460, 16),
+            ForeColor = SystemColors.GrayText,
+        };
+        Controls.Add(lblSpotifyHint);
         y += 28;
 
         var chkContextMenu = new CheckBox

@@ -44,6 +44,14 @@ public class AppConfig
     // Legacy (pre-1.3.2): migrated into CookiesBrowser on load if CookiesBrowser is empty.
     public string SpotDlCookiesBrowser { get; set; } = "";
 
+    // Optional: your own free Spotify app (Client Credentials flow - app-only auth for reading
+    // public catalog metadata, no user login, no Premium required). spotDL's built-in default
+    // app is shared by every spotDL install worldwide and gets rate-limited by Spotify for
+    // hours at a time under global load; your own app has its own private quota. Empty = fall
+    // back to spotDL's shared default (works until it doesn't).
+    public string SpotifyClientId { get; set; } = "";
+    public string SpotifyClientSecret { get; set; } = "";
+
     // ISO timestamp of the last automatic yt-dlp/spotDL update check (throttles it to daily).
     public string LastToolsUpdateCheck { get; set; } = "";
 

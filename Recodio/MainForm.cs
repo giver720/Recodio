@@ -433,6 +433,8 @@ public class MainForm : Form
         _config.ClipboardAutoFill = form.ClipboardAutoFill;
         _config.CookiesBrowser = form.CookiesBrowser;
         _config.SpotDlCookiesBrowser = form.CookiesBrowser;
+        _config.SpotifyClientId = form.SpotifyClientId;
+        _config.SpotifyClientSecret = form.SpotifyClientSecret;
 
         try { Directory.CreateDirectory(_config.WatchDir); } catch { /* user will fix path */ }
         SaveConfig();

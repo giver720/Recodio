@@ -82,8 +82,23 @@ public static class SpotDlDownloader
 
     // ----- Analyze / preview (spotdl save → .spotdl JSON) -----
 
+    // spotDL's built-in default Spotify app is shared by every spotDL install worldwide and
+    // gets rate-limited by Spotify for hours (seen: Retry-After 86400s = 24h) under global
+    // load - spotDL then silently waits/retries instead of failing fast, which is what makes
+    // "revisar metadatos" feel hung. A personal free app (Client Credentials, no user login,
+    // no Premium) has its own private quota and sidesteps this entirely.
+    private static void AddSpotifyAppCredentials(ProcessStartInfo psi, string? clientId, string? clientSecret)
+    {
+        if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret)) return;
+        psi.ArgumentList.Add("--client-id");
+        psi.ArgumentList.Add(clientId.Trim());
+        psi.ArgumentList.Add("--client-secret");
+        psi.ArgumentList.Add(clientSecret.Trim());
+    }
+
     public static async Task<SpotDlAnalyzeResult> AnalyzeAsync(
-        string spotdlPath, string query, CancellationToken ct)
+        string spotdlPath, string query, CancellationToken ct,
+        string? spotifyClientId = null, string? spotifyClientSecret = null)
     {
         if (string.IsNullOrWhiteSpace(query))
             throw new ArgumentException("Query vacia.", nameof(query));
@@ -101,6 +116,7 @@ public static class SpotDlDownloader
             psi.ArgumentList.Add(savePath);
             psi.ArgumentList.Add("--max-retries");
             psi.ArgumentList.Add(SpotifyApiMaxRetries.ToString());
+            AddSpotifyAppCredentials(psi, spotifyClientId, spotifyClientSecret);
             psi.ArgumentList.Add("save");
             psi.ArgumentList.Add(query);
 
@@ -172,7 +188,8 @@ public static class SpotDlDownloader
         IReadOnlyList<string>? audioProviders,
         string cookiesFromBrowser,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, CancellationToken ct,
-        IReadOnlyList<SpotDlTrack>? knownTracksMeta = null)
+        IReadOnlyList<SpotDlTrack>? knownTracksMeta = null,
+        string? spotifyClientId = null, string? spotifyClientSecret = null)
     {
         Directory.CreateDirectory(destDir);
         var archivePath = ArchivePathFor(destDir);
@@ -410,7 +427,8 @@ public static class SpotDlDownloader
                         spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
                         attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                         archivePath, providers, cookieArgs,
-                        onLine, WrapProgress, permanent, ct);
+                        onLine, WrapProgress, permanent, ct,
+                        spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                     InvalidateArchive();
                 }
                 catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
@@ -424,7 +442,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: missing, format, bitrate, embedLyrics,
                             attemptThreads, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, WrapProgress, permanent, ct);
+                            onLine, WrapProgress, permanent, ct,
+                            spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                         InvalidateArchive();
                     }
                     catch (InvalidOperationException ex2)
@@ -468,7 +487,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
                             attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, WrapProgress, permanent, ct, errorsPath);
+                            onLine, WrapProgress, permanent, ct, errorsPath,
+                            spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                     }
                     catch (InvalidOperationException ex) when (CookieManager.IsCookieFailureText(ex.Message) && cookieArgs.Enabled)
                     {
@@ -479,7 +499,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, queries: [query], format, bitrate, embedLyrics,
                             attemptThreads, skipExisting, organizeInFolders, sponsorBlock, destDir,
                             archivePath, providers, cookieArgs,
-                            onLine, WrapProgress, permanent, ct, errorsPath);
+                            onLine, WrapProgress, permanent, ct, errorsPath,
+                            spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                     }
 
                     var failedUrls = ReadFailedUrls(errorsPath);
@@ -577,7 +598,8 @@ public static class SpotDlDownloader
                         spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
                         threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                         archivePath, rescueProviders, cookieArgs,
-                        onLine, WrapProgress, permanent, errorsPath: null, ct);
+                        onLine, WrapProgress, permanent, errorsPath: null, ct,
+                        spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                     InvalidateArchive();
 
                     ok = ArchiveContains(archivePath, url);
@@ -593,7 +615,8 @@ public static class SpotDlDownloader
                             spotdlPath, ffmpegPath, [url], format, bitrate, embedLyrics,
                             threads: 1, skipExisting: true, organizeInFolders, sponsorBlock, destDir,
                             archivePath, rescueProviders, cookieArgs,
-                            onLine, WrapProgress, permanent, errorsPath: null, ct);
+                            onLine, WrapProgress, permanent, errorsPath: null, ct,
+                            spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
                         InvalidateArchive();
                         ok = ArchiveContains(archivePath, url);
                     }
@@ -647,7 +670,8 @@ public static class SpotDlDownloader
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
         string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanent,
-        CancellationToken ct, string? errorsPath = null)
+        CancellationToken ct, string? errorsPath = null,
+        string? spotifyClientId = null, string? spotifyClientSecret = null)
     {
         var attemptThreads = Math.Clamp(threads, 1, MaxThreads);
         for (var attempt = 1; ; attempt++)
@@ -659,7 +683,8 @@ public static class SpotDlDownloader
                     spotdlPath, ffmpegPath, queries, format, bitrate, embedLyrics, attemptThreads,
                     skipExisting, organizeInFolders, sponsorBlock, destDir, archivePath,
                     providers, cookies, onLine, onProgress, permanent, errorsPath,
-                    ct, code => lastExitCode = code);
+                    ct, code => lastExitCode = code,
+                    spotifyClientId: spotifyClientId, spotifyClientSecret: spotifyClientSecret);
             }
             catch (InvalidOperationException) when (lastExitCode < 0 && attemptThreads > 1 && attempt <= MaxRateLimitRetries)
             {
@@ -682,7 +707,8 @@ public static class SpotDlDownloader
         bool skipExisting, bool organizeInFolders, bool sponsorBlock, string destDir,
         string archivePath, IReadOnlyList<string> providers, CookieArgs cookies,
         Action<string> onLine, Action<DownloadProgressUpdate> onProgress, HashSet<string> permanent,
-        string? errorsPath, CancellationToken ct, Action<int>? onExitCode = null)
+        string? errorsPath, CancellationToken ct, Action<int>? onExitCode = null,
+        string? spotifyClientId = null, string? spotifyClientSecret = null)
     {
         if (queries.Count == 0) return 0;
 
@@ -697,6 +723,7 @@ public static class SpotDlDownloader
         psi.ArgumentList.Add(Math.Clamp(threads, 1, MaxThreads).ToString());
         psi.ArgumentList.Add("--max-retries");
         psi.ArgumentList.Add(SpotifyApiMaxRetries.ToString());
+        AddSpotifyAppCredentials(psi, spotifyClientId, spotifyClientSecret);
         psi.ArgumentList.Add("--ffmpeg");
         psi.ArgumentList.Add(ffmpegPath);
 

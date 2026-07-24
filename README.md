@@ -10,7 +10,7 @@ App de escritorio para Windows (WinForms, **.NET 10**) que unifica tres flujos d
 
 Corre en la **bandeja del sistema**, con historial unificado, chequeo de dependencias, tema oscuro/claro, una sola instancia (IPC por named pipe) y **auto-actualización** desde GitHub Releases.
 
-**Versión actual: 1.3.23**
+**Versión actual: 1.3.24**
 
 ## Requisitos
 
@@ -90,6 +90,12 @@ Si tenías `config.json` / `history.json` al lado del ejecutable, se **migran un
 - Progreso por archivo y opción de borrar el original
 
 ## Changelog resumido
+
+### 1.3.24
+- spotDL: soporte para app de Spotify propia (Client ID/Secret en Configuracion, opcional, gratis, sin Premium)
+- Arregla que "Analizar" en spotDL tardara 1-2+ minutos por cancion: la app compartida de spotDL
+  esta rate-limiteada por Spotify (24hs) por el uso global de todo el mundo; una app propia tiene
+  su propia cuota privada
 
 ### 1.3.23
 - Barra de progreso: cola con colores por estado (verde/rojo/gris/azul) en vez de solo texto plano
