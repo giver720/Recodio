@@ -1,5 +1,6 @@
 import {
   Ban,
+  CheckCircle2,
   Copy,
   Eraser,
   FolderOpen,
@@ -42,6 +43,8 @@ export function QueueView() {
   const toast = useStore((s) => s.toast);
   const { openMenu, menu } = useMenu();
 
+  // Ni descargando ni esperando: la cola está en reposo aunque tenga historial.
+  const idle = stats.running === 0 && stats.queued === 0;
   const active = jobs.filter((j) => j.status === "running" || j.status === "queued");
   const finished = jobs.filter((j) => !active.includes(j));
 
@@ -62,31 +65,47 @@ export function QueueView() {
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline gap-2">
-              <span className="text-[22px] font-semibold tabular-nums">
-                {Math.round(stats.overall * 100)}%
-              </span>
+              {idle ? (
+                <span className="flex items-center gap-2 text-[16px] font-semibold text-ok">
+                  <CheckCircle2 size={17} />
+                  Todo listo
+                </span>
+              ) : (
+                <span className="text-[22px] font-semibold tabular-nums">
+                  {Math.round(stats.overall * 100)}%
+                </span>
+              )}
               <span className="text-[13px] text-muted">
-                {stats.running} activas · {stats.queued} en cola · {stats.done} listas
+                {!idle && `${stats.running} activas · ${stats.queued} en cola · `}
+                {stats.done} listas
                 {stats.failed > 0 && ` · ${stats.failed} con error`}
                 {stats.skipped > 0 && ` · ${stats.skipped} omitidas`}
               </span>
             </div>
-            <ProgressBar
-              value={stats.overall}
-              status={stats.failed > 0 && stats.running === 0 ? "failed" : "running"}
-              phase="downloading"
-              height={10}
-              className="mt-2.5"
-            />
+            {/* Con la cola parada, una barra al 100% sugiere que algo sigue en
+                marcha. Mejor que desaparezca. */}
+            {!idle && (
+              <ProgressBar
+                value={stats.overall}
+                status="running"
+                phase="downloading"
+                height={10}
+                className="mt-2.5"
+              />
+            )}
           </div>
 
-          <Button onClick={() => api.queueSetPaused(!stats.paused)}>
-            {stats.paused ? <Play size={14} /> : <Pause size={14} />}
-            {stats.paused ? "Reanudar" : "Pausar"}
-          </Button>
-          <IconButton title="Cancelar todo" onClick={() => api.queueCancelAll()}>
-            <ListX size={16} />
-          </IconButton>
+          {!idle && (
+            <>
+              <Button onClick={() => api.queueSetPaused(!stats.paused)}>
+                {stats.paused ? <Play size={14} /> : <Pause size={14} />}
+                {stats.paused ? "Reanudar" : "Pausar"}
+              </Button>
+              <IconButton title="Cancelar todo" onClick={() => api.queueCancelAll()}>
+                <ListX size={16} />
+              </IconButton>
+            </>
+          )}
           <IconButton title="Limpiar terminadas" onClick={() => api.queueClearFinished()}>
             <Eraser size={16} />
           </IconButton>
