@@ -30,5 +30,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
-  }
+  },
+  "license": "MIT",
+  "description": "Descargador de video y musica con yt-dlp y spotDL"
 }

@@ -179,3 +179,11 @@ el móvil en cliente de un Recodio de escritorio. La interfaz no cambia.
 ## Licencia
 
 Pendiente de definir.
+
+## Licencia
+
+MIT — ver [LICENSE](LICENSE).
+
+Recodio **invoca** yt-dlp, spotDL y ffmpeg como programas externos; no incorpora
+su código ni enlaza con ellos, así que sus licencias no se propagan a este
+proyecto. Cada uno conserva la suya y se descarga de su origen oficial.

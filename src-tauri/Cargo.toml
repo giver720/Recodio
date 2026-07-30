@@ -4,6 +4,7 @@ version = "0.1.1"
 description = "Descargador de vídeo y música con yt-dlp y spotDL"
 authors = ["Recodio"]
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
