@@ -70,6 +70,7 @@ yt-dlp · spotDL · ffmpeg
 | `src-tauri/src/analyze.rs` | Previsualización de enlaces y playlists |
 | `src-tauri/src/db.rs` | Biblioteca en SQLite y detección de duplicados |
 | `src/views/` | Las cuatro pantallas: Descargar, Cola, Biblioteca, Ajustes |
+| `tools/make_icon.py` | Genera el icono; la misma geometría vive en `src/components/Mark.tsx` |
 
 El progreso no se estima: yt-dlp se lanza con `--progress-template` y una
 plantilla propia, así que los bytes y la ETA vienen del propio descargador.

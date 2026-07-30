@@ -1,5 +1,6 @@
 import { Download, Library as LibraryIcon, ListVideo, Settings2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { Mark } from "./components/Mark";
 import { ProgressBar } from "./components/ProgressBar";
 import { Toasts } from "./components/Toasts";
 import { useStore } from "./lib/store";
@@ -120,8 +121,8 @@ export default function App() {
 function Logo({ className = "" }: { className?: string }) {
   return (
     <div className={`flex items-center gap-2.5 ${className}`}>
-      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-accent via-accent3 to-accent2 shadow-lg shadow-accent/30">
-        <Download size={17} className="text-white" />
+      <span className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-gradient-to-br from-accent via-accent3 to-accent2 shadow-lg shadow-accent/30">
+        <Mark size={19} className="text-white" />
       </span>
       <span className="text-[17px] font-semibold tracking-tight">Recodio</span>
     </div>
