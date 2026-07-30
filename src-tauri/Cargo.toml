@@ -34,4 +34,6 @@ dirs = "6.0.0"
 which = "8.0.5"
 tokio-util = "0.7.19"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
 

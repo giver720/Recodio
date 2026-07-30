@@ -260,6 +260,7 @@ fn reveal_file(path: String) -> CmdResult<()> {
     if !p.exists() {
         return Err("El archivo ya no existe en disco".into());
     }
+
     #[cfg(windows)]
     {
         // `explorer` returns a non-zero exit code even on success, so ignore it.
@@ -268,11 +269,58 @@ fn reveal_file(path: String) -> CmdResult<()> {
             .spawn();
         Ok(())
     }
-    #[cfg(not(windows))]
+
+    #[cfg(target_os = "macos")]
     {
+        proc::command("open")
+            .arg("-R")
+            .arg(p)
+            .spawn()
+            .map_err(err)?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Nautilus, Dolphin, Nemo y compañía implementan esta interfaz D-Bus,
+        // que abre la carpeta *y* deja el archivo seleccionado. Si no hay bus de
+        // sesión (una sesión mínima, un contenedor), abrimos la carpeta a secas.
+        let revealed = proc::command("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+            ])
+            .arg(format!("array:string:{}", file_uri(p)))
+            .arg("string:")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if revealed {
+            return Ok(());
+        }
         let dir = p.parent().unwrap_or(p);
         open_path(&dir.to_string_lossy())
     }
+}
+
+/// Percent-encode a path into a `file://` URI. Sin esto, cualquier ruta con
+/// espacios o acentos —o sea, casi cualquier título de vídeo— rompe la llamada.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn file_uri(path: &Path) -> String {
+    let mut out = String::from("file://");
+    for byte in path.to_string_lossy().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn open_path(path: &str) -> CmdResult<()> {
@@ -299,6 +347,20 @@ fn open_folder(path: String) -> CmdResult<()> {
     open_path(&path)
 }
 
+/// La interfaz cambia un par de detalles según el sistema (filtros del selector
+/// de archivos, sobre todo). Preguntarlo una vez es más honesto que adivinarlo
+/// desde el user agent del webview.
+#[tauri::command]
+fn app_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
 // -------------------------------------------------------- herramientas
 
 #[tauri::command]
@@ -319,11 +381,30 @@ fn tools_update_ytdlp(state: State<'_, AppState>) -> CmdResult<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK con el renderizador DMA-BUF deja la ventana en negro en muchas
+    // combinaciones de GPU y driver (NVIDIA propietario, Mesa antiguo, WSLg).
+    // Es el fallo número uno de las apps Tauri en Linux y el remedio estándar
+    // es desactivarlo; no se pierde nada apreciable. Tiene que hacerse antes de
+    // que arranque GTK, y se respeta el valor si el usuario ya puso el suyo.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // El actualizador y el reinicio solo existen en escritorio; en móvil
+            // registrarlos rompería el arranque.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
+
             let data_dir = app.path().app_data_dir()?;
             let config_dir = app.path().app_config_dir()?;
             let core = Arc::new(Core::new(data_dir, config_dir)?);
@@ -352,6 +433,7 @@ pub fn run() {
             play_file,
             reveal_file,
             open_folder,
+            app_platform,
             tools_status,
             tools_install_ytdlp,
             tools_update_ytdlp,

@@ -1,18 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-fn default_download_dir() -> PathBuf {
-    dirs::video_dir()
+/// En Linux las carpetas XDG pueden no existir (sesión mínima, contenedor,
+/// WSL). Caer al directorio personal es infinitamente mejor que caer a `.`,
+/// que dejaría las descargas donde sea que se lanzara el ejecutable.
+fn media_dir(preferred: Option<PathBuf>) -> PathBuf {
+    preferred
         .or_else(dirs::download_dir)
+        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Recodio")
 }
 
+fn default_download_dir() -> PathBuf {
+    media_dir(dirs::video_dir())
+}
+
 fn default_audio_dir() -> PathBuf {
-    dirs::audio_dir()
-        .or_else(dirs::download_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Recodio")
+    media_dir(dirs::audio_dir())
 }
 
 /// What to do when a file for the same source id already exists on disk.

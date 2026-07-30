@@ -75,14 +75,70 @@ yt-dlp · spotDL · ffmpeg
 El progreso no se estima: yt-dlp se lanza con `--progress-template` y una
 plantilla propia, así que los bytes y la ETA vienen del propio descargador.
 
-## Portabilidad
+## Linux
 
-El frontend es el mismo en las tres plataformas.
+Compila y empaqueta con la misma orden que en Windows; sale un `.deb` y un
+`.AppImage` en `src-tauri/target/release/bundle/`.
 
-- **Linux**: `npm run tauri build` sin cambios; los binarios se resuelven igual.
-- **Android**: `npm run tauri android init`. Ahí no se puede ejecutar `yt-dlp.exe`,
-  así que el backend tendrá que empaquetar Python (Chaquopy) o hablar con una
-  instancia de Recodio en el escritorio. La UI no cambia.
+```bash
+npm run tauri build -- --bundles deb,appimage
+```
+
+Dependencias de compilación (Ubuntu / Debian):
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential
+```
+
+Las herramientas de descarga van como **`Recommends`** del paquete, no como
+`Depends`: Recodio arranca sin ellas y sabe instalarse su propio yt-dlp desde
+Ajustes, así que una dependencia dura solo serviría para bloquear la instalación
+en distros donde el paquete se llama de otra forma.
+
+Lo que cambia respecto a Windows, y por qué:
+
+| Detalle | Windows | Linux |
+| --- | --- | --- |
+| Mostrar en la carpeta | `explorer /select` | D-Bus `FileManager1.ShowItems`, con la ruta percent-encoded; si no hay bus de sesión, abre la carpeta |
+| Abrir archivos y enlaces | `cmd /C start` | `xdg-open` |
+| Ventanas de consola | `CREATE_NO_WINDOW` en cada proceso hijo | innecesario |
+| Binario propio de yt-dlp | `yt-dlp.exe` | `yt-dlp_linux`, con `chmod 755` |
+| Carpetas por defecto | Vídeos / Música | XDG, con respaldo al directorio personal |
+| Selector de reproductor | filtra `.exe` | sin filtro: `/usr/bin/vlc` no tiene extensión |
+
+También se desactiva el renderizador DMA-BUF de WebKitGTK al arrancar
+(`WEBKIT_DISABLE_DMABUF_RENDERER=1`). Es el fallo más común de las aplicaciones
+Tauri en Linux — ventana en negro con NVIDIA propietario, Mesa antiguo o WSLg — y
+se respeta el valor si ya viene puesto desde fuera.
+
+## Actualizaciones
+
+Recodio comprueba si hay versión nueva desde **Ajustes › Actualizaciones**, se
+descarga el paquete y se reinstala al reiniciar. Las actualizaciones van firmadas:
+la clave pública está en `tauri.conf.json` y la app rechaza cualquier paquete que
+no case con ella.
+
+Para publicar una versión hay que firmar los artefactos con la clave privada:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/recodio.key
+npm run tauri build
+```
+
+> La clave privada **nunca** entra en el repositorio. Si se pierde, no se pueden
+> volver a firmar actualizaciones para los usuarios que ya tengan Recodio
+> instalado: habría que reinstalar a mano con una clave nueva.
+
+El actualizador solo puede reemplazar formatos que se auto-sustituyen: el
+instalador de Windows y el AppImage. Quien instale el `.deb` recibe las
+actualizaciones por su gestor de paquetes, y la propia interfaz se lo dice en vez
+de fallar en silencio.
+
+## Android
+
+Pendiente. `npm run tauri android init` genera el proyecto, pero ahí no se puede
+ejecutar un binario de yt-dlp: habrá que empaquetar Python (Chaquopy) o convertir
+el móvil en cliente de un Recodio de escritorio. La interfaz no cambia.
 
 ## Licencia
 

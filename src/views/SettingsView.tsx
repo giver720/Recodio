@@ -1,5 +1,7 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  ArrowUpCircle,
   CheckCircle2,
   Cookie,
   Download,
@@ -13,6 +15,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { UpdateCard } from "../components/UpdateCard";
 import { Button, Field, Select, Toggle, inputClass } from "../components/ui";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
@@ -33,11 +36,14 @@ export function SettingsView() {
   const settings = useStore((s) => s.settings);
   const save = useStore((s) => s.saveSettings);
   const toast = useStore((s) => s.toast);
+  const platform = useStore((s) => s.platform);
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState("");
 
   useEffect(() => {
     api.toolsStatus().then(setTools);
+    getVersion().then(setVersion);
   }, []);
 
   if (!settings) return null;
@@ -49,12 +55,24 @@ export function SettingsView() {
   }
 
   async function pickPlayer() {
+    // En Linux y macOS los ejecutables no tienen extensión (`/usr/bin/vlc`), así
+    // que cualquier filtro los escondería justamente a ellos.
     const picked = await openDialog({
       multiple: false,
-      filters: [{ name: "Programas", extensions: ["exe", "AppImage", "sh", ""] }],
+      filters:
+        platform === "windows"
+          ? [{ name: "Programas", extensions: ["exe", "bat", "cmd"] }]
+          : undefined,
     });
     if (typeof picked === "string") save({ externalPlayer: picked });
   }
+
+  const playerPlaceholder =
+    platform === "windows"
+      ? "p. ej. C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+      : platform === "macos"
+        ? "p. ej. /Applications/VLC.app/Contents/MacOS/VLC"
+        : "p. ej. /usr/bin/vlc o /usr/bin/mpv";
 
   function toggleCategory(list: "sponsorblockRemove" | "sponsorblockMark", value: string) {
     const current = new Set(s[list]);
@@ -396,6 +414,10 @@ export function SettingsView() {
         </div>
       </Section>
 
+      <Section icon={<ArrowUpCircle size={16} />} title="Actualizaciones">
+        <UpdateCard version={version} />
+      </Section>
+
       <Section icon={<Palette size={16} />} title="Apariencia y reproducción">
         <Field label="Tema">
           <Select
@@ -415,7 +437,7 @@ export function SettingsView() {
             <input
               className={inputClass}
               value={s.externalPlayer ?? ""}
-              placeholder="p. ej. C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
+              placeholder={playerPlaceholder}
               onChange={(e) => save({ externalPlayer: e.target.value || null })}
               spellCheck={false}
             />

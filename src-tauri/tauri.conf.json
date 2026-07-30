@@ -27,11 +27,30 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/OWNER/Recodio/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFRTM3MzJENTdERjIyREMKUldUY0l0OVhMWFBqUG8zNFRFTEEzZ2JTQStOc1FKV0pvMjRoTW9LblZxNUIzeG54MWdFSUlNSjgK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "createUpdaterArtifacts": true,
     "shortDescription": "Descargador de vídeo y música con yt-dlp y spotDL",
     "longDescription": "Recodio descarga vídeos, playlists y música desde miles de sitios usando yt-dlp y spotDL, con SponsorBlock, detección de duplicados y biblioteca integrada.",
+    "linux": {
+      "deb": {
+        "section": "video",
+        "recommends": ["yt-dlp", "ffmpeg", "python3-spotdl", "xdg-utils"]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

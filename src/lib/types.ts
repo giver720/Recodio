@@ -1,3 +1,5 @@
+export type Platform = "windows" | "linux" | "macos";
+
 export type Kind = "video" | "audio";
 export type Source = "ytdlp" | "spotdl";
 

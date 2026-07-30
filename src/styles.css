@@ -45,8 +45,10 @@
   --color-warn: var(--rc-warn);
   --color-bad: var(--rc-bad);
 
-  --font-sans: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
-    sans-serif;
+  /* Segoe en Windows, luego las tipografías habituales de los escritorios
+     Linux, y system-ui como red de seguridad en macOS. */
+  --font-sans: "Inter", "Segoe UI Variable Display", "Segoe UI", "Ubuntu",
+    "Cantarell", "Noto Sans", system-ui, sans-serif;
 }
 
 * {

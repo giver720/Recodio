@@ -5,6 +5,7 @@ import type {
   Job,
   Kind,
   LibraryItem,
+  Platform,
   Playlist,
   PlaylistInfo,
   QueueStats,
@@ -64,6 +65,7 @@ export const api = {
   playFile: (path: string) => invoke<void>("play_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),
+  appPlatform: () => invoke<Platform>("app_platform"),
 
   toolsStatus: () => invoke<ToolStatus[]>("tools_status"),
   toolsInstallYtdlp: () => invoke<string>("tools_install_ytdlp"),

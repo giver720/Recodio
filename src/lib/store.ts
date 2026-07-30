@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api } from "./api";
-import type { Job, QueueStats, Settings } from "./types";
+import type { Job, Platform, QueueStats, Settings } from "./types";
 
 export type Toast = {
   id: number;
@@ -21,6 +21,7 @@ const emptyStats: QueueStats = {
 
 interface State {
   ready: boolean;
+  platform: Platform;
   settings: Settings | null;
   jobs: Job[];
   stats: QueueStats;
@@ -38,6 +39,7 @@ let toastSeq = 0;
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
+  platform: "windows",
   settings: null,
   jobs: [],
   stats: emptyStats,
@@ -45,12 +47,13 @@ export const useStore = create<State>((set, get) => ({
   libraryVersion: 0,
 
   init: async () => {
-    const [settings, jobs, stats] = await Promise.all([
+    const [settings, jobs, stats, platform] = await Promise.all([
       api.getSettings(),
       api.queueList(),
       api.queueStats(),
+      api.appPlatform(),
     ]);
-    set({ settings, jobs, stats, ready: true });
+    set({ settings, jobs, stats, platform, ready: true });
 
     listen<Job>("job-update", (e) => {
       const job = e.payload;

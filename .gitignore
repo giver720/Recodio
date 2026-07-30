@@ -10,7 +10,14 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+dist-linux
 *.local
+
+# Clave privada de firma del actualizador. Vive en ~/.tauri, pero si alguna vez
+# acaba aquí por error, que no salga en un commit: quien la tenga puede firmar
+# actualizaciones que Recodio instalará como legítimas.
+*.key
+
 
 # Editor directories and files
 .vscode/*
