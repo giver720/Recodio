@@ -1,0 +1,286 @@
+use crate::binaries::Binaries;
+use crate::job::{Job, JobPhase, Progress};
+use crate::proc::async_command;
+use crate::settings::Settings;
+use anyhow::{anyhow, Result};
+use std::path::PathBuf;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
+
+/// Marker prefixes so our machine-readable lines never collide with yt-dlp's
+/// own human-readable output.
+const DL_TAG: &str = "RCDP|";
+const PP_TAG: &str = "RCDPP|";
+
+/// Cookies / proxy / rate limiting — the flags that decide whether restricted
+/// material is reachable at all. Shared with the analyze step so a link that
+/// previews correctly also downloads correctly.
+pub fn apply_access_args(cmd: &mut tokio::process::Command, s: &Settings) {
+    if let Some(browser) = s.cookies_from_browser.as_ref().filter(|b| !b.is_empty()) {
+        cmd.arg("--cookies-from-browser").arg(browser);
+    }
+    if let Some(file) = s.cookies_file.as_ref().filter(|p| p.exists()) {
+        cmd.arg("--cookies").arg(file);
+    }
+    if let Some(proxy) = s.proxy.as_ref().filter(|p| !p.is_empty()) {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    if let Some(limit) = s.rate_limit.as_ref().filter(|r| !r.is_empty()) {
+        cmd.arg("--limit-rate").arg(limit);
+    }
+    // Geo-restricted material: try harder before giving up.
+    cmd.arg("--geo-bypass");
+}
+
+fn apply_format_args(cmd: &mut tokio::process::Command, s: &Settings, kind: &str) {
+    if kind == "audio" {
+        cmd.arg("-f").arg("ba/b");
+        cmd.arg("-x").arg("--audio-format").arg(&s.audio_format);
+        if matches!(s.audio_format.as_str(), "mp3" | "m4a" | "opus" | "vorbis") {
+            cmd.arg("--audio-quality").arg(format!("{}K", s.audio_bitrate));
+        }
+        return;
+    }
+
+    let fmt = if s.video_quality == "best" {
+        "bv*+ba/b".to_string()
+    } else {
+        let h = &s.video_quality;
+        format!("bv*[height<=?{h}]+ba/b[height<=?{h}]/b")
+    };
+    cmd.arg("-f").arg(fmt);
+
+    if s.video_container != "original" {
+        cmd.arg("--merge-output-format").arg(&s.video_container);
+    }
+}
+
+fn apply_extras_args(cmd: &mut tokio::process::Command, s: &Settings, kind: &str) {
+    if s.embed_metadata {
+        cmd.arg("--embed-metadata");
+    }
+    if s.embed_thumbnail {
+        cmd.arg("--embed-thumbnail");
+    }
+    if s.embed_chapters && kind == "video" {
+        cmd.arg("--embed-chapters");
+    }
+    if s.write_subtitles && kind == "video" {
+        cmd.arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--sub-langs")
+            .arg(&s.subtitle_langs);
+        if s.embed_subtitles {
+            cmd.arg("--embed-subs");
+        }
+    }
+
+    if s.sponsorblock {
+        if !s.sponsorblock_remove.is_empty() {
+            cmd.arg("--sponsorblock-remove")
+                .arg(s.sponsorblock_remove.join(","));
+        }
+        if !s.sponsorblock_mark.is_empty() {
+            cmd.arg("--sponsorblock-mark")
+                .arg(s.sponsorblock_mark.join(","));
+        }
+    }
+}
+
+/// Run one yt-dlp download. `on_progress` is called for every parsed progress
+/// line; the returned path is the final file after all post-processing.
+pub async fn download(
+    job: &Job,
+    settings: &Settings,
+    bins: &Binaries,
+    archive_path: Option<PathBuf>,
+    cancel: CancellationToken,
+    mut on_progress: impl FnMut(Progress) + Send,
+) -> Result<PathBuf> {
+    let exe = bins.require("yt-dlp")?;
+    let path_file = std::env::temp_dir().join(format!("recodio-path-{}.txt", job.id));
+
+    let mut cmd = async_command(exe);
+    cmd.arg("--ignore-config")
+        .arg("--no-playlist")
+        .arg("--newline")
+        // `--progress` guarantees progress lines even when other flags imply quiet.
+        .arg("--progress")
+        .arg("--no-simulate")
+        .arg("--progress-template")
+        .arg(format!(
+            "download:{DL_TAG}%(progress.status)s|%(progress.downloaded_bytes)s|\
+             %(progress.total_bytes)s|%(progress.total_bytes_estimate)s|\
+             %(progress.speed)s|%(progress.eta)s"
+        ))
+        .arg("--progress-template")
+        .arg(format!(
+            "postprocess:{PP_TAG}%(progress.status)s|%(progress.postprocessor)s"
+        ))
+        .arg("--print-to-file")
+        .arg("after_move:filepath")
+        .arg(&path_file)
+        .arg("--paths")
+        .arg(&job.dest_dir)
+        .arg("-o")
+        .arg(&settings.output_template)
+        .arg("--retries")
+        .arg(settings.retries.to_string())
+        .arg("--fragment-retries")
+        .arg(settings.retries.to_string())
+        .arg("--concurrent-fragments")
+        .arg("4");
+
+    if job.overwrite {
+        cmd.arg("--force-overwrites");
+    } else {
+        cmd.arg("--no-overwrites");
+    }
+
+    if let Some(archive) = archive_path {
+        cmd.arg("--download-archive").arg(archive);
+    }
+
+    apply_access_args(&mut cmd, settings);
+    apply_format_args(&mut cmd, settings, &job.kind);
+    apply_extras_args(&mut cmd, settings, &job.kind);
+
+    let target = if job.entry.url.is_empty() {
+        &job.entry.source_id
+    } else {
+        &job.entry.url
+    };
+    cmd.arg(target);
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut out_lines = BufReader::new(stdout).lines();
+    let mut err_lines = BufReader::new(stderr).lines();
+    let mut error_tail: Vec<String> = Vec::new();
+
+    let status = loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = child.kill().await;
+                let _ = std::fs::remove_file(&path_file);
+                return Err(anyhow!("Cancelado"));
+            }
+            line = out_lines.next_line() => {
+                match line? {
+                    Some(l) => handle_line(&l, &mut on_progress, &mut error_tail),
+                    None => break child.wait().await?,
+                }
+            }
+            line = err_lines.next_line() => {
+                if let Some(l) = line? {
+                    handle_line(&l, &mut on_progress, &mut error_tail);
+                }
+            }
+        }
+    };
+
+    // Drain whatever is still buffered on stderr after the process exits.
+    while let Ok(Some(l)) = err_lines.next_line().await {
+        handle_line(&l, &mut on_progress, &mut error_tail);
+    }
+
+    let printed = std::fs::read_to_string(&path_file).unwrap_or_default();
+    let _ = std::fs::remove_file(&path_file);
+    let final_path = printed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .map(PathBuf::from);
+
+    if !status.success() {
+        // A non-zero exit with a real file usually means a cosmetic
+        // post-processing warning, so only fail when nothing landed.
+        if let Some(p) = final_path.filter(|p| p.exists()) {
+            return Ok(p);
+        }
+        let msg = crate::analyze::clean_ytdlp_error(&error_tail.join("\n"));
+        return Err(anyhow!(if msg.is_empty() {
+            format!("yt-dlp terminó con código {:?}", status.code())
+        } else {
+            msg
+        }));
+    }
+
+    final_path
+        .filter(|p| p.exists())
+        .ok_or_else(|| anyhow!("La descarga terminó pero no se encontró el archivo resultante"))
+}
+
+fn handle_line(line: &str, on_progress: &mut impl FnMut(Progress), error_tail: &mut Vec<String>) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    if let Some(rest) = line.strip_prefix(DL_TAG) {
+        let f: Vec<&str> = rest.split('|').collect();
+        let num = |i: usize| -> Option<f64> {
+            f.get(i)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && *s != "NA" && *s != "None")
+                .and_then(|s| s.parse::<f64>().ok())
+        };
+        let downloaded = num(1).unwrap_or(0.0);
+        let total = num(2).or_else(|| num(3)).unwrap_or(0.0);
+        let status = f.first().copied().unwrap_or("downloading");
+
+        on_progress(Progress {
+            phase: Some(JobPhase::Downloading),
+            progress: Some(if total > 0.0 {
+                (downloaded / total).clamp(0.0, 1.0)
+            } else {
+                -1.0
+            }),
+            downloaded_bytes: Some(downloaded as u64),
+            total_bytes: Some(total as u64),
+            speed: Some(num(4).unwrap_or(0.0)),
+            eta: num(5).map(|e| e as u64),
+            message: (status == "finished").then(|| "Descarga completa".to_string()),
+        });
+        return;
+    }
+
+    if let Some(rest) = line.strip_prefix(PP_TAG) {
+        let mut f = rest.split('|');
+        let _status = f.next().unwrap_or("");
+        let pp = f.next().unwrap_or("").trim();
+        on_progress(Progress {
+            phase: Some(JobPhase::Processing),
+            message: Some(friendly_postprocessor(pp)),
+            ..Default::default()
+        });
+        return;
+    }
+
+    if line.contains("ERROR:") || line.starts_with("WARNING:") {
+        error_tail.push(line.to_string());
+        if error_tail.len() > 20 {
+            error_tail.remove(0);
+        }
+    }
+}
+
+fn friendly_postprocessor(pp: &str) -> String {
+    match pp {
+        "Merger" => "Uniendo vídeo y audio…".into(),
+        "ExtractAudio" => "Extrayendo audio…".into(),
+        "ModifyChapters" | "SponsorBlock" => "Recortando segmentos de SponsorBlock…".into(),
+        "EmbedThumbnail" => "Incrustando miniatura…".into(),
+        "FFmpegMetadata" => "Escribiendo metadatos…".into(),
+        "FFmpegVideoConvertor" | "VideoConvertor" => "Convirtiendo formato…".into(),
+        "EmbedSubtitle" => "Incrustando subtítulos…".into(),
+        "MoveFiles" => "Moviendo a destino…".into(),
+        "" => "Procesando…".into(),
+        other => format!("Procesando ({other})…"),
+    }
+}

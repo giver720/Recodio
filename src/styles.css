@@ -1,0 +1,228 @@
+@import "tailwindcss";
+
+/* Palette lives in plain custom properties so the theme can be swapped at
+   runtime; the Tailwind tokens below just point at them. */
+:root {
+  --rc-base: #090b11;
+  --rc-surface: #10131c;
+  --rc-surface-2: #171b28;
+  --rc-surface-3: #1f2434;
+  --rc-line: #272d3f;
+  --rc-ink: #e9edf9;
+  --rc-muted: #8e97b2;
+  --rc-accent: #7c5cff;
+  --rc-accent-2: #22d3ee;
+  --rc-accent-3: #f472b6;
+  --rc-ok: #34d399;
+  --rc-warn: #fbbf24;
+  --rc-bad: #fb7185;
+  --rc-shadow: rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="light"] {
+  --rc-base: #f4f6fc;
+  --rc-surface: #ffffff;
+  --rc-surface-2: #f0f2f9;
+  --rc-surface-3: #e6eaf5;
+  --rc-line: #d9dded;
+  --rc-ink: #131722;
+  --rc-muted: #5d6580;
+  --rc-shadow: rgba(20, 25, 45, 0.12);
+}
+
+@theme {
+  --color-base: var(--rc-base);
+  --color-surface: var(--rc-surface);
+  --color-surface2: var(--rc-surface-2);
+  --color-surface3: var(--rc-surface-3);
+  --color-line: var(--rc-line);
+  --color-ink: var(--rc-ink);
+  --color-muted: var(--rc-muted);
+  --color-accent: var(--rc-accent);
+  --color-accent2: var(--rc-accent-2);
+  --color-accent3: var(--rc-accent-3);
+  --color-ok: var(--rc-ok);
+  --color-warn: var(--rc-warn);
+  --color-bad: var(--rc-bad);
+
+  --font-sans: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui,
+    sans-serif;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rc-line) transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--rc-base);
+  color: var(--rc-ink);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Selecting text everywhere makes a desktop app feel like a web page. */
+button,
+label,
+nav {
+  user-select: none;
+}
+
+/* --- Aurora backdrop -------------------------------------------------- */
+
+.rc-aurora::before {
+  content: "";
+  position: absolute;
+  inset: -30% -10% auto -10%;
+  height: 70%;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      50% 60% at 20% 30%,
+      color-mix(in oklab, var(--rc-accent) 34%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      45% 55% at 78% 20%,
+      color-mix(in oklab, var(--rc-accent-2) 26%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      40% 50% at 55% 60%,
+      color-mix(in oklab, var(--rc-accent-3) 18%, transparent),
+      transparent 70%
+    );
+  filter: blur(60px);
+  opacity: 0.75;
+  animation: rc-drift 22s ease-in-out infinite alternate;
+}
+
+@keyframes rc-drift {
+  0% {
+    transform: translate3d(-2%, 0, 0) scale(1);
+  }
+  100% {
+    transform: translate3d(3%, 4%, 0) scale(1.12);
+  }
+}
+
+/* --- Progress ---------------------------------------------------------- */
+
+.rc-bar {
+  position: relative;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--rc-ink) 8%, transparent);
+}
+
+.rc-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--rc-accent) 0%,
+    var(--rc-accent-3) 50%,
+    var(--rc-accent-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: rc-flow 2.4s linear infinite;
+  transition: width 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 18px -2px color-mix(in oklab, var(--rc-accent) 70%, transparent);
+}
+
+.rc-bar-fill.is-processing {
+  background: linear-gradient(90deg, var(--rc-warn), var(--rc-accent-3));
+  background-size: 200% 100%;
+}
+
+.rc-bar-fill.is-done {
+  background: linear-gradient(90deg, var(--rc-ok), var(--rc-accent-2));
+  animation: none;
+}
+
+.rc-bar-fill.is-error {
+  background: linear-gradient(90deg, var(--rc-bad), #f97316);
+  animation: none;
+}
+
+@keyframes rc-flow {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Indeterminate: a comet sweeping the track. */
+.rc-bar-indeterminate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 38%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--rc-accent),
+    var(--rc-accent-2),
+    transparent
+  );
+  animation: rc-sweep 1.35s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes rc-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+/* --- Bits and pieces ---------------------------------------------------- */
+
+.rc-card {
+  background: color-mix(in oklab, var(--rc-surface) 88%, transparent);
+  border: 1px solid var(--rc-line);
+  border-radius: 1rem;
+  backdrop-filter: blur(12px);
+}
+
+.rc-ring:focus-visible {
+  outline: 2px solid var(--rc-accent);
+  outline-offset: 2px;
+}
+
+.rc-fade-in {
+  animation: rc-fade 260ms ease both;
+}
+
+@keyframes rc-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.rc-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--rc-surface-2) 25%,
+    var(--rc-surface-3) 50%,
+    var(--rc-surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: rc-shimmer 1.4s linear infinite;
+}
+
+@keyframes rc-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
