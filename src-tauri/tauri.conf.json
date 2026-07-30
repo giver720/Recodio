@@ -30,7 +30,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/OWNER/Recodio/releases/latest/download/latest.json"
+        "https://github.com/giver720/Recodio/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFRTM3MzJENTdERjIyREMKUldUY0l0OVhMWFBqUG8zNFRFTEEzZ2JTQStOc1FKV0pvMjRoTW9LblZxNUIzeG54MWdFSUlNSjgK"
     }
