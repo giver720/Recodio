@@ -84,6 +84,42 @@ Compila y empaqueta con la misma orden que en Windows; sale un `.deb` y un
 npm run tauri build -- --bundles deb,appimage
 ```
 
+### Las herramientas de descarga
+
+Recodio no descarga por sí mismo: lanza `yt-dlp`, y `spotDL` para Spotify, con
+`ffmpeg` para unir y convertir. En Windows suelen venir ya instaladas de otras
+cosas; en una instalación limpia de Linux no hay ninguna.
+
+**No hace falta instalarlas a mano.** Si faltan, Recodio lo dice nada más abrir
+la pantalla de Descargar y ofrece un botón que se las descarga a su propia
+carpeta de datos: no toca el sistema, no pide contraseña y no interfiere con lo
+que ya tengas. También están en **Ajustes › Herramientas**.
+
+Usa los ejecutables autónomos que publican los propios proyectos, así que no hace
+falta ni Python: yt-dlp y spotDL vienen de sus releases de GitHub, y ffmpeg de
+las compilaciones estáticas de johnvansickle en Linux y de BtbN en Windows. Del
+comprimido de ffmpeg se extraen `ffmpeg` y `ffprobe` con el `tar` del sistema
+—GNU en Linux, bsdtar desde Windows 10, que además abre zip—, para no arrastrar
+media docena de dependencias de compresión solo para eso.
+
+Si prefieres las del sistema, también valen:
+
+```bash
+sudo apt install yt-dlp ffmpeg   # imprescindibles
+pipx install spotdl              # solo para enlaces de Spotify
+```
+
+El `.deb` trae yt-dlp y ffmpeg como `Recommends`, así que `apt` las instala sola
+salvo que tengas desactivadas las recomendaciones. spotDL no está empaquetado en
+Debian ni en Ubuntu, y por eso va aparte con `pipx`.
+
+> Las herramientas instaladas con `pip install --user` o `pipx` van a
+> `~/.local/bin`, que **no** está en el `PATH` de una aplicación lanzada desde el
+> menú del escritorio. Recodio busca ahí explícitamente, además de en el `PATH`,
+> junto a tu intérprete de Python, en `/snap/bin` y en las rutas de Flatpak.
+
+### Compilación
+
 Dependencias de compilación (Ubuntu / Debian):
 
 ```bash

@@ -368,10 +368,25 @@ fn tools_status(state: State<'_, AppState>) -> Vec<ToolStatus> {
     state.core.bins.status_all()
 }
 
+/// Instala una herramienta en la carpeta de Recodio. Emite `tool-install-progress`
+/// con `(nombre, fracción)` para que la interfaz muestre el avance: ffmpeg pasa
+/// de cien megas y sin barra parecería congelado.
 #[tauri::command]
-async fn tools_install_ytdlp(state: State<'_, AppState>) -> CmdResult<String> {
+async fn tools_install(
+    name: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<String> {
+    use tauri::Emitter;
+
     let core = state.core.clone();
-    core.bins.install_ytdlp().await.map_err(err)
+    let nombre_evento = name.clone();
+    core.bins
+        .install(&name, move |fraccion| {
+            let _ = app.emit("tool-install-progress", (nombre_evento.clone(), fraccion));
+        })
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -435,7 +450,7 @@ pub fn run() {
             open_folder,
             app_platform,
             tools_status,
-            tools_install_ytdlp,
+            tools_install,
             tools_update_ytdlp,
         ])
         .run(tauri::generate_context!())

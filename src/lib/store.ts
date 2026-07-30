@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api } from "./api";
-import type { Job, Platform, QueueStats, Settings } from "./types";
+import type { Job, Platform, QueueStats, Settings, ToolStatus } from "./types";
 
 export type Toast = {
   id: number;
@@ -28,8 +28,11 @@ interface State {
   toasts: Toast[];
   /** Bumped whenever the library changes so views can refetch. */
   libraryVersion: number;
+  /** Estado de yt-dlp, spotDL y ffmpeg. */
+  tools: ToolStatus[];
 
   init: () => Promise<void>;
+  refreshTools: () => Promise<void>;
   saveSettings: (patch: Partial<Settings>) => Promise<void>;
   toast: (kind: Toast["kind"], text: string) => void;
   dismissToast: (id: number) => void;
@@ -45,15 +48,19 @@ export const useStore = create<State>((set, get) => ({
   stats: emptyStats,
   toasts: [],
   libraryVersion: 0,
+  tools: [],
+
+  refreshTools: async () => set({ tools: await api.toolsStatus() }),
 
   init: async () => {
-    const [settings, jobs, stats, platform] = await Promise.all([
+    const [settings, jobs, stats, platform, tools] = await Promise.all([
       api.getSettings(),
       api.queueList(),
       api.queueStats(),
       api.appPlatform(),
+      api.toolsStatus(),
     ]);
-    set({ settings, jobs, stats, platform, ready: true });
+    set({ settings, jobs, stats, platform, tools, ready: true });
 
     listen<Job>("job-update", (e) => {
       const job = e.payload;

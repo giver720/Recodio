@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { MissingTools } from "../components/MissingTools";
 import { Thumb } from "../components/Thumb";
 import { useMenu } from "../components/Menu";
 import {
@@ -43,6 +44,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [url, setUrl] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [startedAt, setStartedAt] = useState(0);
+  const tools = useStore((s) => s.tools);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [kind, setKind] = useState<Kind>("video");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -184,6 +186,8 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-6 py-6">
+      <MissingTools tools={tools} />
+
       {/* ---- Barra de enlace ---- */}
       <div className="rc-card p-4">
         <div className="flex items-center gap-2">

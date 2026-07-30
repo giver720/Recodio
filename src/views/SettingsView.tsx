@@ -376,24 +376,29 @@ export function SettingsView() {
             </div>
           ))}
         </div>
-        <div className="flex gap-2">
-          <Button
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await api.toolsInstallYtdlp();
-                setTools(await api.toolsStatus());
-                toast("success", "yt-dlp instalado en la carpeta de Recodio");
-              } catch (e) {
-                toast("error", String(e));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <Download size={14} /> Instalar yt-dlp propio
-          </Button>
+        <div className="flex flex-wrap gap-2">
+          {["yt-dlp", "spotdl", "ffmpeg"].map((name) => (
+            <Button
+              key={name}
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await api.toolsInstall(name);
+                  const actualizadas = await api.toolsStatus();
+                  setTools(actualizadas);
+                  useStore.setState({ tools: actualizadas });
+                  toast("success", `${name} instalado en la carpeta de Recodio`);
+                } catch (e) {
+                  toast("error", String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <Download size={14} /> {name}
+            </Button>
+          ))}
           <Button
             disabled={busy}
             onClick={async () => {

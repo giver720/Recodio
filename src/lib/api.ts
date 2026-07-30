@@ -68,6 +68,6 @@ export const api = {
   appPlatform: () => invoke<Platform>("app_platform"),
 
   toolsStatus: () => invoke<ToolStatus[]>("tools_status"),
-  toolsInstallYtdlp: () => invoke<string>("tools_install_ytdlp"),
+  toolsInstall: (name: string) => invoke<string>("tools_install", { name }),
   toolsUpdateYtdlp: () => invoke<string>("tools_update_ytdlp"),
 };
