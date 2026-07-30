@@ -19,7 +19,7 @@ import { UpdateCard } from "../components/UpdateCard";
 import { Button, Field, Select, Toggle, inputClass } from "../components/ui";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
-import type { Settings, ToolStatus } from "../lib/types";
+import type { PlayerOption, Settings, ToolStatus } from "../lib/types";
 
 const SPONSOR_CATEGORIES: { value: string; label: string }[] = [
   { value: "sponsor", label: "Patrocinios" },
@@ -41,9 +41,12 @@ export function SettingsView() {
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState("");
 
+  const [players, setPlayers] = useState<PlayerOption[]>([]);
+
   useEffect(() => {
     api.toolsStatus().then(setTools);
     getVersion().then(setVersion);
+    api.detectPlayers().then(setPlayers);
   }, []);
 
   if (!settings) return null;
@@ -448,6 +451,46 @@ export function SettingsView() {
             />
             <Button onClick={pickPlayer}>Elegir…</Button>
           </div>
+
+          {players.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11.5px] text-muted">Detectados:</span>
+              {players.map((p) => (
+                <button
+                  key={p.path}
+                  type="button"
+                  onClick={() => save({ externalPlayer: p.path })}
+                  title={p.path}
+                  className={`rounded-lg px-2 py-1 text-[11.5px] transition ${
+                    s.externalPlayer === p.path
+                      ? "bg-accent/20 text-accent"
+                      : "bg-surface3 text-muted hover:text-fg"
+                  }`}
+                >
+                  {p.name}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => save({ externalPlayer: null })}
+                className={`rounded-lg px-2 py-1 text-[11.5px] transition ${
+                  !s.externalPlayer
+                    ? "bg-accent/20 text-accent"
+                    : "bg-surface3 text-muted hover:text-fg"
+                }`}
+              >
+                El del sistema
+              </button>
+            </div>
+          )}
+
+          {!s.externalPlayer && (
+            <p className="mt-1.5 text-[11.5px] leading-snug text-muted">
+              Sin reproductor elegido se usa el que tenga asociado el sistema, que
+              puede ser distinto para cada formato: es fácil acabar con los MP3
+              abriéndose en uno y los MP4 en otro.
+            </p>
+          )}
         </Field>
       </Section>
     </div>

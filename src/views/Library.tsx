@@ -236,7 +236,14 @@ export function Library() {
                         .join(" · ")}
                     </p>
                   </div>
-                  <div className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100">
+                  {/* La fila entera responde al doble clic, así que los botones
+                      tienen que cortar la propagación: si no, un doble clic
+                      encima de uno dispara su onClick dos veces *y además* el
+                      doble clic de la fila, abriendo tres reproductores. */}
+                  <div
+                    className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100"
+                    onDoubleClick={(e) => e.stopPropagation()}
+                  >
                     <IconButton
                       title="Reproducir"
                       onClick={() =>

@@ -347,6 +347,80 @@ fn open_folder(path: String) -> CmdResult<()> {
     open_path(&path)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerOption {
+    name: String,
+    path: String,
+}
+
+/// Reproductores instalados en el equipo.
+///
+/// Sin esto, dejar el reproductor sin configurar significa usar la asociación
+/// del sistema, que puede ser distinta para cada formato: es fácil acabar con
+/// los MP3 abriéndose en un reproductor y los MP4 en otro sin haber elegido eso.
+/// Y la alternativa era buscar el ejecutable a mano por el disco.
+#[tauri::command]
+fn detect_players() -> Vec<PlayerOption> {
+    // Nombre visible, ejecutable a buscar en el PATH, y rutas habituales.
+    let candidatos: &[(&str, &str, &[&str])] = if cfg!(windows) {
+        &[
+            (
+                "VLC",
+                "vlc",
+                &[
+                    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+                    r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+                ],
+            ),
+            ("mpv", "mpv", &[r"C:\Program Files\mpv\mpv.exe"]),
+            (
+                "MPC-HC",
+                "mpc-hc64",
+                &[
+                    r"C:\Program Files\MPC-HC\mpc-hc64.exe",
+                    r"C:\Program Files (x86)\MPC-HC\mpc-hc.exe",
+                ],
+            ),
+            (
+                "PotPlayer",
+                "PotPlayerMini64",
+                &[r"C:\Program Files\DAUM\PotPlayer\PotPlayerMini64.exe"],
+            ),
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            ("VLC", "vlc", &["/Applications/VLC.app/Contents/MacOS/VLC"]),
+            ("IINA", "iina", &["/Applications/IINA.app/Contents/MacOS/IINA"]),
+            ("mpv", "mpv", &[]),
+        ]
+    } else {
+        &[
+            ("VLC", "vlc", &["/usr/bin/vlc", "/snap/bin/vlc"]),
+            ("mpv", "mpv", &["/usr/bin/mpv"]),
+            ("Celluloid", "celluloid", &[]),
+            ("SMPlayer", "smplayer", &[]),
+            ("Totem", "totem", &[]),
+        ]
+    };
+
+    candidatos
+        .iter()
+        .filter_map(|(nombre, comando, rutas)| {
+            let encontrado = which::which(comando).ok().or_else(|| {
+                rutas
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.is_file())
+            })?;
+            Some(PlayerOption {
+                name: (*nombre).to_string(),
+                path: encontrado.to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
+}
+
 /// La interfaz cambia un par de detalles según el sistema (filtros del selector
 /// de archivos, sobre todo). Preguntarlo una vez es más honesto que adivinarlo
 /// desde el user agent del webview.
@@ -449,6 +523,7 @@ pub fn run() {
             reveal_file,
             open_folder,
             app_platform,
+            detect_players,
             tools_status,
             tools_install,
             tools_update_ytdlp,

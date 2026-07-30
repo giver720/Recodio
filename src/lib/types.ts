@@ -1,5 +1,11 @@
 export type Platform = "windows" | "linux" | "macos";
 
+/** Reproductor encontrado en el equipo. */
+export interface PlayerOption {
+  name: string;
+  path: string;
+}
+
 export type Kind = "video" | "audio";
 export type Source = "ytdlp" | "spotdl";
 

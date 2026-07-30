@@ -6,6 +6,7 @@ import type {
   Kind,
   LibraryItem,
   Platform,
+  PlayerOption,
   Playlist,
   PlaylistInfo,
   QueueStats,
@@ -66,6 +67,7 @@ export const api = {
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),
   appPlatform: () => invoke<Platform>("app_platform"),
+  detectPlayers: () => invoke<PlayerOption[]>("detect_players"),
 
   toolsStatus: () => invoke<ToolStatus[]>("tools_status"),
   toolsInstall: (name: string) => invoke<string>("tools_install", { name }),
