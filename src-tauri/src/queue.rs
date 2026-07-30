@@ -323,6 +323,35 @@ impl Inner {
         }
 
         self.cancels.lock().unwrap().remove(&id);
+
+        if let Some(playlist_id) = job.playlist_id.as_deref() {
+            self.write_playlist_when_complete(playlist_id);
+        }
+    }
+
+    /// Cuando el último elemento de una playlist sale de la cola, la playlist
+    /// local queda escrita sola: carpeta propia (si está activado) más su
+    /// `.m3u8` listo para abrir en VLC. El usuario no tiene que exportar nada.
+    fn write_playlist_when_complete(&self, playlist_id: &str) {
+        let pending = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| j.playlist_id.as_deref() == Some(playlist_id))
+            .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running));
+        if pending {
+            return;
+        }
+
+        match crate::m3u::write(&self.core.db, playlist_id) {
+            Ok(path) => {
+                let _ = self
+                    .app
+                    .emit("playlist-ready", path.to_string_lossy().into_owned());
+            }
+            Err(e) => eprintln!("[recodio] no se pudo escribir la playlist: {e}"),
+        }
     }
 
     fn finish(

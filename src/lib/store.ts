@@ -68,6 +68,12 @@ export const useStore = create<State>((set, get) => ({
     listen("library-changed", () =>
       set((s) => ({ libraryVersion: s.libraryVersion + 1 })),
     );
+
+    listen<string>("playlist-ready", (e) => {
+      const name = e.payload.split(/[\\/]/).pop() ?? e.payload;
+      get().toast("success", `Playlist creada: ${name}`);
+      set((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+    });
   },
 
   saveSettings: async (patch) => {

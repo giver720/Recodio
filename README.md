@@ -23,8 +23,12 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
   no disponibles de una playlist se marcan en lugar de romper la descarga.
 - **Cola con progreso real**: bytes, velocidad, ETA y fase (descarga, unión,
   extracción de audio, recorte de SponsorBlock).
-- **Biblioteca** por playlist / vídeos / música, con búsqueda, reproducción en el
-  reproductor externo que elijas y exportación a `.m3u8` para VLC.
+- **Playlists locales automáticas**: al descargar una playlist, Recodio le da su
+  propia carpeta y escribe dentro un `.m3u8` con el orden original y rutas
+  relativas — se abre en VLC de un doble clic y la carpeta se puede mover o
+  copiar a otro equipo sin romper nada. No hay que exportar nada a mano.
+- **Biblioteca** por playlist / vídeos / música, con búsqueda y reproducción en
+  el reproductor externo que elijas.
 
 ## Requisitos
 

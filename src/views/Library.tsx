@@ -114,12 +114,12 @@ export function Library() {
             onContextMenu={(e) =>
               openMenu(e, [
                 {
-                  label: "Exportar .m3u8 para VLC",
-                  icon: <ExternalLink size={14} />,
+                  label: "Regenerar el .m3u8",
+                  icon: <RefreshCw size={14} />,
                   onClick: async () => {
                     try {
                       const path = await api.exportM3u(p.id);
-                      toast("success", `Playlist exportada: ${path}`);
+                      toast("success", `Playlist regenerada: ${path}`);
                     } catch (err) {
                       toast("error", String(err));
                     }

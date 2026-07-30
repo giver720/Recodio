@@ -3,6 +3,7 @@ mod binaries;
 mod core;
 mod db;
 mod job;
+mod m3u;
 mod proc;
 mod queue;
 mod settings;
@@ -97,7 +98,7 @@ fn enqueue(req: EnqueueRequest, state: State<'_, AppState>) -> CmdResult<usize> 
             core.db.upsert_playlist(&row).map_err(err)?;
 
             let dir = if settings.playlist_subfolder {
-                base.join(sanitize(&pl.title))
+                base.join(m3u::sanitize(&pl.title))
             } else {
                 base.clone()
             };
@@ -218,42 +219,14 @@ fn library_prune(state: State<'_, AppState>) -> CmdResult<usize> {
     state.core.db.prune_missing().map_err(err)
 }
 
-/// Write an .m3u8 next to the files so VLC (or anything else) can open the
-/// whole playlist in one go.
+/// Rewrite the playlist file on demand. Recodio already does this on its own
+/// when a playlist finishes downloading; this is for regenerating it after
+/// deleting or adding files by hand.
 #[tauri::command]
 fn export_m3u(playlist_id: String, state: State<'_, AppState>) -> CmdResult<String> {
-    let items = state
-        .core
-        .db
-        .list_items(Some(&playlist_id), None)
-        .map_err(err)?;
-    if items.is_empty() {
-        return Err("Esa playlist no tiene archivos descargados todavía".into());
-    }
-    let playlists = state.core.db.list_playlists().map_err(err)?;
-    let title = playlists
-        .iter()
-        .find(|p| p.id == playlist_id)
-        .map(|p| p.title.clone())
-        .unwrap_or_else(|| "playlist".into());
-
-    let dir = Path::new(&items[0].file_path)
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or("No se pudo determinar la carpeta de destino")?;
-    let path = dir.join(format!("{}.m3u8", sanitize(&title)));
-
-    let mut out = String::from("#EXTM3U\n");
-    for it in &items {
-        out.push_str(&format!(
-            "#EXTINF:{},{}\n{}\n",
-            it.duration.unwrap_or(-1.0).round() as i64,
-            it.title,
-            it.file_path
-        ));
-    }
-    std::fs::write(&path, out).map_err(err)?;
-    Ok(path.to_string_lossy().into_owned())
+    m3u::write(&state.core.db, &playlist_id)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(err)
 }
 
 // ------------------------------------------------------ abrir / reproducir
@@ -342,26 +315,6 @@ async fn tools_install_ytdlp(state: State<'_, AppState>) -> CmdResult<String> {
 #[tauri::command]
 fn tools_update_ytdlp(state: State<'_, AppState>) -> CmdResult<String> {
     state.core.bins.update_ytdlp().map_err(err)
-}
-
-// --------------------------------------------------------------- utils
-
-/// Make a string safe as a folder name on every platform we target.
-fn sanitize(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_end_matches('.').trim();
-    if trimmed.is_empty() {
-        "Recodio".into()
-    } else {
-        trimmed.chars().take(120).collect()
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
