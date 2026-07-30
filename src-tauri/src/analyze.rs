@@ -183,7 +183,150 @@ fn entry_from_ytdlp(v: &Value, index: i64, fallback_extractor: Option<&str>) -> 
     }
 }
 
+/// Extrae el tipo y el id de un enlace de Spotify. Tiene que aguantar las URL
+/// localizadas (`/intl-es/album/…`), el `?si=` que añade el botón de compartir y
+/// los URI nativos (`spotify:album:…`).
+fn spotify_ref(url: &str) -> Option<(String, String)> {
+    let cleaned = url.split(['?', '#']).next().unwrap_or(url);
+    let parts: Vec<&str> = cleaned
+        .split(['/', ':'])
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let pos = parts
+        .iter()
+        .position(|p| matches!(*p, "track" | "album" | "playlist" | "artist"))?;
+    let id = parts.get(pos + 1)?;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((parts[pos].to_string(), (*id).to_string()))
+}
+
+/// Listado rápido leyendo la página de incrustación de Spotify.
+///
+/// `spotdl save` tarda unos 31 s de arranque más 4,75 s por canción — dos
+/// minutos y medio para un álbum de 25, y ocho para una playlist de cien, solo
+/// para *previsualizar*. Esta página devuelve la misma lista en un segundo y sin
+/// autenticación. Si Spotify cambia el formato, se cae al camino de spotdl.
+async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
+    let body = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .build()?
+        .get(format!("https://open.spotify.com/embed/{kind}/{id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    const OPEN: &str = r#"<script id="__NEXT_DATA__" type="application/json">"#;
+    let start = body
+        .find(OPEN)
+        .ok_or_else(|| anyhow!("la página de Spotify no trae los datos esperados"))?
+        + OPEN.len();
+    let end = body[start..]
+        .find("</script>")
+        .ok_or_else(|| anyhow!("datos de Spotify incompletos"))?;
+
+    let json: Value = serde_json::from_str(&body[start..start + end])?;
+    let entity = json
+        .pointer("/props/pageProps/state/data/entity")
+        .ok_or_else(|| anyhow!("Spotify cambió la estructura de la página"))?;
+
+    let cover = entity
+        .pointer("/coverArt/sources")
+        .and_then(Value::as_array)
+        .and_then(|a| a.last())
+        .and_then(|s| s.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let tracks = entity.get("trackList").and_then(Value::as_array);
+
+    // Una pista suelta: la propia entidad es la canción, no hay lista.
+    if tracks.map(|t| t.is_empty()).unwrap_or(true) {
+        let name = str_field(entity, &["name", "title"]).unwrap_or_else(|| "Pista".into());
+        let artist = entity
+            .pointer("/artists/0/name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        return Ok(AnalyzeResult {
+            source: "spotdl".into(),
+            is_playlist: false,
+            playlist: None,
+            entries: vec![Entry {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: str_field(entity, &["id"]).unwrap_or_else(|| id.to_string()),
+                extractor: "spotify".into(),
+                title: match &artist {
+                    Some(a) => format!("{a} - {name}"),
+                    None => name,
+                },
+                url: format!("https://open.spotify.com/track/{id}"),
+                uploader: artist,
+                duration: entity.get("duration").and_then(Value::as_f64).map(|d| d / 1000.0),
+                thumbnail: cover,
+                index: 1,
+                existing_video: None,
+                existing_audio: None,
+                unavailable: false,
+            }],
+        });
+    }
+
+    let entries: Vec<Entry> = tracks
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let title = str_field(t, &["title"]).unwrap_or_else(|| format!("Pista {}", i + 1));
+            let artist = str_field(t, &["subtitle"]);
+            let track_id = str_field(t, &["uri"])
+                .and_then(|u| u.rsplit(':').next().map(str::to_string))
+                .unwrap_or_else(|| format!("track-{i}"));
+            Entry {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: track_id.clone(),
+                extractor: "spotify".into(),
+                title: match &artist {
+                    Some(a) => format!("{a} - {title}"),
+                    None => title,
+                },
+                url: format!("https://open.spotify.com/track/{track_id}"),
+                uploader: artist,
+                duration: t.get("duration").and_then(Value::as_f64).map(|d| d / 1000.0),
+                thumbnail: cover.clone(),
+                index: i as i64 + 1,
+                existing_video: None,
+                existing_audio: None,
+                unavailable: !t.get("isPlayable").and_then(Value::as_bool).unwrap_or(true),
+            }
+        })
+        .collect();
+
+    Ok(AnalyzeResult {
+        source: "spotdl".into(),
+        is_playlist: true,
+        playlist: Some(PlaylistInfo {
+            source_id: id.to_string(),
+            title: str_field(entity, &["name", "title"]).unwrap_or_else(|| "Spotify".into()),
+            url: format!("https://open.spotify.com/{kind}/{id}"),
+            uploader: str_field(entity, &["subtitle"]),
+            thumbnail: cover,
+        }),
+        entries,
+    })
+}
+
 async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
+    if let Some((kind, id)) = spotify_ref(url) {
+        match analyze_spotify_embed(&kind, &id).await {
+            Ok(result) => return Ok(result),
+            Err(e) => eprintln!("[recodio] listado rápido de Spotify no disponible ({e}); usando spotdl"),
+        }
+    }
+
     let exe = bins.require("spotdl")?;
     let tmp = std::env::temp_dir().join(format!("recodio-{}.spotdl", uuid::Uuid::new_v4()));
 
@@ -294,6 +437,82 @@ fn pick_thumbnail(v: &Value) -> Option<String> {
                 .and_then(|t| t.get("url").and_then(Value::as_str))
                 .map(str::to_string)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lee_enlaces_de_spotify_en_todas_sus_formas() {
+        let casos = [
+            // El que rompía: URL localizada con el ?si= del botón de compartir.
+            (
+                "https://open.spotify.com/intl-es/album/7ePC9qS9mSOTY9E0YPP6yg?si=12b2413b08644101",
+                ("album", "7ePC9qS9mSOTY9E0YPP6yg"),
+            ),
+            (
+                "https://open.spotify.com/album/7ePC9qS9mSOTY9E0YPP6yg",
+                ("album", "7ePC9qS9mSOTY9E0YPP6yg"),
+            ),
+            (
+                "https://open.spotify.com/intl-pt-br/track/2yg9UN4eo5eMVJ7OB4RWj3",
+                ("track", "2yg9UN4eo5eMVJ7OB4RWj3"),
+            ),
+            (
+                "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+                ("playlist", "37i9dQZF1DXcBWIGoYBM5M"),
+            ),
+            (
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=x&pt=y",
+                ("playlist", "37i9dQZF1DXcBWIGoYBM5M"),
+            ),
+        ];
+
+        for (url, (kind, id)) in casos {
+            let got = spotify_ref(url).unwrap_or_else(|| panic!("no se pudo leer: {url}"));
+            assert_eq!((got.0.as_str(), got.1.as_str()), (kind, id), "en {url}");
+        }
+    }
+
+    #[test]
+    fn rechaza_lo_que_no_es_un_enlace_de_spotify() {
+        assert!(spotify_ref("https://www.youtube.com/watch?v=dQw4w9WgXcQ").is_none());
+        assert!(spotify_ref("https://open.spotify.com/").is_none());
+        assert!(spotify_ref("https://open.spotify.com/album/").is_none());
+    }
+
+    /// Toca la red de verdad, así que no corre en la suite normal:
+    ///     cargo test --lib -- --ignored --nocapture
+    /// Sirve para comprobar de un vistazo si Spotify cambió el formato de la
+    /// página de incrustación, que es lo único que puede romper la vía rápida.
+    #[tokio::test]
+    #[ignore]
+    async fn listado_rapido_contra_spotify_real() {
+        let album = analyze_spotify_embed("album", "1ATL5GLyefJaxhQzSPVrLX")
+            .await
+            .expect("el álbum debería listarse");
+        assert!(album.is_playlist);
+        assert_eq!(album.entries.len(), 25, "Scorpion tiene 25 pistas");
+        let primera = &album.entries[0];
+        assert!(primera.title.contains("Drake"), "título: {}", primera.title);
+        assert!(primera.duration.unwrap_or(0.0) > 60.0);
+        assert!(primera.url.starts_with("https://open.spotify.com/track/"));
+
+        let track = analyze_spotify_embed("track", "2yg9UN4eo5eMVJ7OB4RWj3")
+            .await
+            .expect("la pista suelta debería listarse");
+        assert!(!track.is_playlist);
+        assert_eq!(track.entries.len(), 1);
+        println!("pista suelta: {}", track.entries[0].title);
+    }
+
+    #[test]
+    fn is_spotify_reconoce_las_variantes() {
+        assert!(is_spotify("https://open.spotify.com/intl-es/album/abc"));
+        assert!(is_spotify("spotify:track:abc"));
+        assert!(!is_spotify("https://music.youtube.com/watch?v=abc"));
+    }
 }
 
 /// yt-dlp errors are verbose; keep the useful line.

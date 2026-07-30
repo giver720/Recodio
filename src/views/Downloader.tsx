@@ -18,7 +18,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Thumb } from "../components/Thumb";
 import { useMenu } from "../components/Menu";
 import {
@@ -42,6 +42,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
 
   const [url, setUrl] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
+  const [startedAt, setStartedAt] = useState(0);
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [kind, setKind] = useState<Kind>("video");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -80,6 +81,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     if (urls.length === 0) return;
 
     setAnalyzing(true);
+    setStartedAt(Date.now());
     setResult(null);
     try {
       const results: AnalyzeResult[] = [];
@@ -213,7 +215,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         </div>
       </div>
 
-      {analyzing && <AnalyzingSkeleton />}
+      {analyzing && <AnalyzingSkeleton startedAt={startedAt} />}
 
       {!analyzing && !result && (
         <EmptyState
@@ -478,9 +480,34 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   );
 }
 
-function AnalyzingSkeleton() {
+/**
+ * Un esqueleto mudo hace que cualquier espera larga parezca un cuelgue. El
+ * contador quita esa duda, y a partir de unos segundos explica de qué depende
+ * la espera en vez de dejar al usuario adivinando.
+ */
+function AnalyzingSkeleton({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      500,
+    );
+    return () => clearInterval(t);
+  }, [startedAt]);
+
   return (
     <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 px-1 text-[12px] text-muted">
+        <Sparkles size={13} className="animate-pulse text-accent2" />
+        <span>Leyendo el enlace…</span>
+        <span className="tabular-nums">{elapsed}s</span>
+        {elapsed >= 8 && (
+          <span className="ml-1 text-muted/80">
+            las listas muy largas tardan más; puedes descartar y volver a intentarlo
+          </span>
+        )}
+      </div>
       <div className="rc-skeleton h-24 rounded-2xl" />
       {[0, 1, 2, 3].map((i) => (
         <div
