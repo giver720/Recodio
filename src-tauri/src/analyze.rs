@@ -66,12 +66,20 @@ pub async fn analyze(
         analyze_ytdlp(url, bins, settings).await?
     };
 
+    // Los duplicados se marcan respecto al destino de *esta* descarga: si la
+    // playlist es nueva, nada está repetido aunque las canciones ya existan en
+    // otra playlist.
+    let playlist_id = result
+        .playlist
+        .as_ref()
+        .and_then(|pl| db.playlist_id_for(&result.source, &pl.source_id));
+
     for entry in &mut result.entries {
         entry.existing_video = db
-            .find_existing(&entry.extractor, &entry.source_id, "video")
+            .find_existing(&entry.extractor, &entry.source_id, "video", playlist_id.as_deref())
             .map(|i| i.file_path);
         entry.existing_audio = db
-            .find_existing(&entry.extractor, &entry.source_id, "audio")
+            .find_existing(&entry.extractor, &entry.source_id, "audio", playlist_id.as_deref())
             .map(|i| i.file_path);
     }
     Ok(result)

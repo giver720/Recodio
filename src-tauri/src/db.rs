@@ -46,6 +46,67 @@ pub struct Playlist {
     pub item_count: i64,
 }
 
+const ITEMS_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS items (
+        id             TEXT PRIMARY KEY,
+        source         TEXT NOT NULL,
+        extractor      TEXT NOT NULL,
+        source_id      TEXT NOT NULL,
+        url            TEXT NOT NULL,
+        title          TEXT NOT NULL,
+        uploader       TEXT,
+        duration       REAL,
+        thumbnail      TEXT,
+        file_path      TEXT NOT NULL,
+        file_size      INTEGER NOT NULL DEFAULT 0,
+        kind           TEXT NOT NULL,
+        ext            TEXT NOT NULL,
+        playlist_id    TEXT REFERENCES playlists(id) ON DELETE SET NULL,
+        playlist_index INTEGER,
+        downloaded_at  INTEGER NOT NULL
+    );
+"#;
+
+/// Las primeras versiones declaraban `UNIQUE(extractor, source_id, kind)` en la
+/// propia tabla, lo que impedía tener una canción en dos playlists distintas. La
+/// restricción se movió a un índice que sí tiene en cuenta la playlist, pero eso
+/// obliga a rehacer la tabla: en SQLite no se puede quitar un UNIQUE declarado
+/// dentro del CREATE TABLE.
+fn migrate_items_uniqueness(conn: &Connection) -> Result<()> {
+    let definicion: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let Some(definicion) = definicion else {
+        return Ok(()); // Base de datos recién creada, ya nace bien.
+    };
+    if !definicion.contains("UNIQUE(extractor, source_id, kind)") {
+        return Ok(());
+    }
+
+    conn.execute_batch(&format!(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        BEGIN;
+        ALTER TABLE items RENAME TO items_antiguo;
+        {ITEMS_TABLE}
+        INSERT INTO items SELECT
+            id, source, extractor, source_id, url, title, uploader, duration,
+            thumbnail, file_path, file_size, kind, ext, playlist_id,
+            playlist_index, downloaded_at
+        FROM items_antiguo;
+        DROP TABLE items_antiguo;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+        "#
+    ))?;
+    Ok(())
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -73,25 +134,19 @@ impl Db {
                 UNIQUE(source, source_id)
             );
 
-            CREATE TABLE IF NOT EXISTS items (
-                id             TEXT PRIMARY KEY,
-                source         TEXT NOT NULL,
-                extractor      TEXT NOT NULL,
-                source_id      TEXT NOT NULL,
-                url            TEXT NOT NULL,
-                title          TEXT NOT NULL,
-                uploader       TEXT,
-                duration       REAL,
-                thumbnail      TEXT,
-                file_path      TEXT NOT NULL,
-                file_size      INTEGER NOT NULL DEFAULT 0,
-                kind           TEXT NOT NULL,
-                ext            TEXT NOT NULL,
-                playlist_id    TEXT REFERENCES playlists(id) ON DELETE SET NULL,
-                playlist_index INTEGER,
-                downloaded_at  INTEGER NOT NULL,
-                UNIQUE(extractor, source_id, kind)
-            );
+            "#,
+        )?;
+        conn.execute_batch(ITEMS_TABLE)?;
+        migrate_items_uniqueness(&conn)?;
+        conn.execute_batch(
+            r#"
+            -- La misma canción puede estar en dos playlists distintas: lo que no
+            -- tiene sentido es tenerla dos veces dentro de la misma. COALESCE
+            -- hace que las descargas sueltas (sin playlist) cuenten como un
+            -- grupo más, porque en SQLite un NULL nunca choca con otro NULL y
+            -- si no se duplicarían sin control.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_items_unicos
+                ON items(extractor, source_id, kind, COALESCE(playlist_id, ''));
 
             CREATE INDEX IF NOT EXISTS idx_items_playlist ON items(playlist_id);
             CREATE INDEX IF NOT EXISTS idx_items_lookup   ON items(extractor, source_id);
@@ -103,9 +158,23 @@ impl Db {
         })
     }
 
-    /// Look for an already-downloaded item of the same kind. Returns `None` when
-    /// the row exists but the file is gone from disk (and cleans the row up).
-    pub fn find_existing(&self, extractor: &str, source_id: &str, kind: &str) -> Option<LibraryItem> {
+    /// Busca una descarga previa **dentro del mismo destino**.
+    ///
+    /// El duplicado se juzga por playlist, no por biblioteca entera: dos
+    /// playlists distintas pueden compartir canciones, y encontrarse con que la
+    /// segunda se queda coja porque los temas «ya estaban» en la primera no es
+    /// lo que nadie espera. `playlist_id` a `None` compara contra las descargas
+    /// sueltas.
+    ///
+    /// Devuelve `None` si la fila existe pero el archivo ya no está en disco, y
+    /// de paso limpia esa fila.
+    pub fn find_existing(
+        &self,
+        extractor: &str,
+        source_id: &str,
+        kind: &str,
+        playlist_id: Option<&str>,
+    ) -> Option<LibraryItem> {
         let item = {
             let conn = self.conn.lock().ok()?;
             let mut stmt = conn
@@ -113,10 +182,12 @@ impl Db {
                     "SELECT id, source, extractor, source_id, url, title, uploader, duration,
                             thumbnail, file_path, file_size, kind, ext, playlist_id,
                             playlist_index, downloaded_at
-                     FROM items WHERE extractor = ?1 AND source_id = ?2 AND kind = ?3",
+                     FROM items
+                     WHERE extractor = ?1 AND source_id = ?2 AND kind = ?3
+                       AND COALESCE(playlist_id, '') = COALESCE(?4, '')",
                 )
                 .ok()?;
-            stmt.query_row(params![extractor, source_id, kind], row_to_item)
+            stmt.query_row(params![extractor, source_id, kind, playlist_id], row_to_item)
                 .optional()
                 .ok()?
         }?;
@@ -136,7 +207,7 @@ impl Db {
                                 thumbnail, file_path, file_size, kind, ext, playlist_id,
                                 playlist_index, downloaded_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
-             ON CONFLICT(extractor, source_id, kind) DO UPDATE SET
+             ON CONFLICT(extractor, source_id, kind, COALESCE(playlist_id, '')) DO UPDATE SET
                 url=excluded.url, title=excluded.title, uploader=excluded.uploader,
                 duration=excluded.duration, thumbnail=excluded.thumbnail,
                 file_path=excluded.file_path, file_size=excluded.file_size,
@@ -303,6 +374,170 @@ impl Db {
             self.delete_item(id, false)?;
         }
         Ok(stale.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn db_temporal() -> (Db, PathBuf) {
+        let ruta = std::env::temp_dir().join(format!("recodio-db-{}.sqlite", uuid::Uuid::new_v4()));
+        (Db::open(&ruta).unwrap(), ruta)
+    }
+
+    fn playlist(db: &Db, nombre: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        db.upsert_playlist(&Playlist {
+            id: id.clone(),
+            source: "spotdl".into(),
+            source_id: nombre.into(),
+            url: format!("https://open.spotify.com/playlist/{nombre}"),
+            title: nombre.into(),
+            uploader: None,
+            thumbnail: None,
+            created_at: 0,
+            item_count: 0,
+        })
+        .unwrap();
+        id
+    }
+
+    /// Crea un archivo de verdad: `find_existing` descarta las filas cuyo
+    /// archivo ya no está, así que sin esto los tests darían falsos negativos.
+    fn item(source_id: &str, playlist_id: Option<&str>, dir: &Path) -> LibraryItem {
+        let ruta = dir.join(format!("{source_id}-{}.mp3", uuid::Uuid::new_v4()));
+        std::fs::write(&ruta, b"audio").unwrap();
+        LibraryItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "spotdl".into(),
+            extractor: "spotify".into(),
+            source_id: source_id.into(),
+            url: format!("https://open.spotify.com/track/{source_id}"),
+            title: source_id.into(),
+            uploader: None,
+            duration: None,
+            thumbnail: None,
+            file_path: ruta.to_string_lossy().into_owned(),
+            file_size: 5,
+            kind: "audio".into(),
+            ext: "mp3".into(),
+            playlist_id: playlist_id.map(str::to_string),
+            playlist_index: Some(1),
+            downloaded_at: 0,
+        }
+    }
+
+    /// Lo que motivó el cambio: dos playlists pueden compartir canciones, y la
+    /// segunda no debe quedarse coja porque los temas «ya estaban» en la primera.
+    #[test]
+    fn la_misma_cancion_puede_estar_en_dos_playlists() {
+        let (db, ruta) = db_temporal();
+        let dir = ruta.parent().unwrap();
+        let (fiesta, gimnasio) = (playlist(&db, "fiesta"), playlist(&db, "gimnasio"));
+
+        db.upsert_item(&item("cancion1", Some(&fiesta), dir)).unwrap();
+
+        // En la playlist donde ya está, se omite.
+        assert!(
+            db.find_existing("spotify", "cancion1", "audio", Some(&fiesta)).is_some(),
+            "debería detectarse como repetida dentro de su propia playlist"
+        );
+        // En otra playlist, no.
+        assert!(
+            db.find_existing("spotify", "cancion1", "audio", Some(&gimnasio)).is_none(),
+            "no debe considerarse repetida en una playlist distinta"
+        );
+        // Y como descarga suelta, tampoco.
+        assert!(db.find_existing("spotify", "cancion1", "audio", None).is_none());
+
+        // Y de hecho puede guardarse en las dos a la vez.
+        db.upsert_item(&item("cancion1", Some(&gimnasio), dir)).unwrap();
+        assert_eq!(db.list_items(Some(&fiesta), None).unwrap().len(), 1);
+        assert_eq!(db.list_items(Some(&gimnasio), None).unwrap().len(), 1);
+
+        std::fs::remove_file(&ruta).ok();
+    }
+
+    #[test]
+    fn dentro_de_una_playlist_no_se_duplica() {
+        let (db, ruta) = db_temporal();
+        let dir = ruta.parent().unwrap();
+        let fiesta = playlist(&db, "fiesta");
+
+        db.upsert_item(&item("cancion1", Some(&fiesta), dir)).unwrap();
+        db.upsert_item(&item("cancion1", Some(&fiesta), dir)).unwrap();
+
+        assert_eq!(
+            db.list_items(Some(&fiesta), None).unwrap().len(),
+            1,
+            "dos veces la misma canción en la misma playlist debe colapsar en una"
+        );
+        std::fs::remove_file(&ruta).ok();
+    }
+
+    #[test]
+    fn las_descargas_sueltas_tampoco_se_duplican_entre_si() {
+        let (db, ruta) = db_temporal();
+        let dir = ruta.parent().unwrap();
+
+        db.upsert_item(&item("suelta", None, dir)).unwrap();
+        db.upsert_item(&item("suelta", None, dir)).unwrap();
+
+        assert_eq!(db.list_items(None, None).unwrap().len(), 1);
+        std::fs::remove_file(&ruta).ok();
+    }
+
+    /// Una base de datos creada por la versión anterior debe poder abrirse y
+    /// quedarse con la regla nueva, sin perder lo que ya tenía.
+    #[test]
+    fn migra_la_restriccion_antigua_conservando_los_datos() {
+        let ruta = std::env::temp_dir().join(format!("recodio-mig-{}.sqlite", uuid::Uuid::new_v4()));
+        let dir = ruta.parent().unwrap();
+
+        {
+            let conn = Connection::open(&ruta).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE playlists (
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
+                    url TEXT NOT NULL, title TEXT NOT NULL, uploader TEXT, thumbnail TEXT,
+                    created_at INTEGER NOT NULL, UNIQUE(source, source_id));
+                CREATE TABLE items (
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, extractor TEXT NOT NULL,
+                    source_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL,
+                    uploader TEXT, duration REAL, thumbnail TEXT, file_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL, ext TEXT NOT NULL,
+                    playlist_id TEXT REFERENCES playlists(id) ON DELETE SET NULL,
+                    playlist_index INTEGER, downloaded_at INTEGER NOT NULL,
+                    UNIQUE(extractor, source_id, kind));
+                "#,
+            )
+            .unwrap();
+            let archivo = dir.join(format!("viejo-{}.mp3", uuid::Uuid::new_v4()));
+            std::fs::write(&archivo, b"audio").unwrap();
+            conn.execute(
+                "INSERT INTO items VALUES ('i1','spotdl','spotify','vieja','u','Vieja',NULL,NULL,
+                    NULL,?1,5,'audio','mp3',NULL,1,0)",
+                params![archivo.to_string_lossy()],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&ruta).unwrap();
+        assert_eq!(
+            db.list_items(None, None).unwrap().len(),
+            1,
+            "la migración no debe perder lo ya descargado"
+        );
+
+        // Y la regla nueva ya está en vigor.
+        let otra = playlist(&db, "otra");
+        db.upsert_item(&item("vieja", Some(&otra), dir)).unwrap();
+        assert_eq!(db.list_items(None, None).unwrap().len(), 2);
+
+        std::fs::remove_file(&ruta).ok();
     }
 }
 

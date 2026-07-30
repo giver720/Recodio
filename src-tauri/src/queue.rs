@@ -199,11 +199,12 @@ impl Inner {
         // Re-check right before downloading: another job in this same batch may
         // have just produced the file.
         if !job.overwrite {
-            if let Some(existing) =
-                self.core
-                    .db
-                    .find_existing(&job.entry.extractor, &job.entry.source_id, &job.kind)
-            {
+            if let Some(existing) = self.core.db.find_existing(
+                &job.entry.extractor,
+                &job.entry.source_id,
+                &job.kind,
+                job.playlist_id.as_deref(),
+            ) {
                 self.finish(
                     &id,
                     JobStatus::Skipped,
