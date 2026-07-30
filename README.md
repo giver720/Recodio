@@ -4,8 +4,8 @@ Descargador de vídeo y música con una interfaz que no parece un formulario.
 Envuelve **yt-dlp** y **spotDL** con cola paralela, SponsorBlock, detección de
 duplicados y una biblioteca local desde la que abrir los archivos en VLC.
 
-> Estado: **v0.1 — escritorio (Windows)**. Los ports a Linux y Android
-> reutilizan este mismo frontend; ver [Portabilidad](#portabilidad).
+> Estado: **v0.1.1 — Windows y Linux**. El port a Android reutilizará este mismo
+> frontend; ver [Android](#android).
 
 ## Qué hace
 
@@ -16,8 +16,10 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
   configurables.
 - **SponsorBlock integrado**: corta patrocinios y autopromoción, o los deja
   marcados como capítulos.
-- **Detección de duplicados**: si ya tienes el vídeo o la canción, Recodio lo
-  omite. Con clic derecho eliges *omitir* o *sobrescribir* por elemento.
+- **Detección de duplicados por playlist**: si ya tienes el vídeo o la canción en
+  ese mismo destino, Recodio lo omite. Dos playlists distintas pueden compartir
+  canciones sin que la segunda se quede coja. Con clic derecho eliges *omitir* o
+  *sobrescribir* por elemento.
 - **Contenido restringido**: cookies del navegador, proxy y `--geo-bypass` para
   vídeos con edad, privados, de miembros o bloqueados por región. Los elementos
   no disponibles de una playlist se marcan en lugar de romper la descarga.
@@ -32,10 +34,15 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
 
 ## Requisitos
 
-`yt-dlp`, `spotDL` y `ffmpeg`. Recodio los busca primero en su propia carpeta de
-datos y, si no están, en el `PATH` del sistema. Desde **Ajustes › Herramientas**
-puedes instalar y actualizar una copia propia de yt-dlp — recomendado, porque los
-cambios de YouTube obligan a actualizarlo a menudo.
+`yt-dlp`, `spotDL` y `ffmpeg` — pero **no hace falta instalarlas a mano**. Si
+falta alguna, Recodio lo dice al abrir la pantalla de Descargar y ofrece
+descargárselas a su propia carpeta de datos, sin permisos de administrador y sin
+tocar el sistema. También están en **Ajustes › Herramientas**.
+
+Si prefieres las tuyas, las busca en el `PATH` y en las carpetas donde suelen
+acabar estas herramientas, `~/.local/bin` incluida. Mantener la copia propia de
+yt-dlp al día es recomendable: los cambios de YouTube obligan a actualizarla a
+menudo.
 
 ## Desarrollo
 
@@ -157,9 +164,16 @@ no case con ella.
 Para publicar una versión hay que firmar los artefactos con la clave privada:
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/recodio.key
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/recodio.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run tauri build
 ```
+
+> La variable es `TAURI_SIGNING_PRIVATE_KEY`, no `..._PATH`, aunque el generador
+> de claves mencione ambas: el empaquetador solo lee la primera. Y ojo en
+> PowerShell, donde `$env:VAR = ""` **borra** la variable en vez de dejarla
+> vacía, así que la contraseña vacía nunca llega y la compilación se queda
+> esperando en un aviso que no se ve.
 
 > La clave privada **nunca** entra en el repositorio. Si se pierde, no se pueden
 > volver a firmar actualizaciones para los usuarios que ya tengan Recodio
