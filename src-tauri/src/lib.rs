@@ -7,7 +7,6 @@ mod m3u;
 mod proc;
 mod queue;
 mod settings;
-mod spotdl;
 mod ytdlp;
 
 use crate::core::Core;

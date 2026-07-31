@@ -29,7 +29,8 @@ const COMANDOS: Record<Platform, Record<string, string>> = {
 const PARA_QUE: Record<string, string> = {
   "yt-dlp": "Sin esto no se puede descargar nada. Es lo único imprescindible.",
   ffmpeg: "Une vídeo y audio, convierte a MP3 y recorta SponsorBlock.",
-  spotdl: "Solo hace falta para los enlaces de Spotify.",
+  spotdl:
+    "Opcional: solo se usa como respaldo si Spotify cambia su página y falla la lectura rápida de las listas.",
 };
 
 /** Lo que ocupa cada descarga, para que nadie se lleve una sorpresa. */
@@ -62,7 +63,9 @@ export function MissingTools({ tools }: { tools: ToolStatus[] }) {
     };
   }, []);
 
-  const missing = tools.filter((t) => !t.found);
+  // spotDL dejó de hacer falta para descargar: la música de Spotify se baja con
+  // yt-dlp. Avisar de que «falta» sería alarmar por nada.
+  const missing = tools.filter((t) => !t.found && t.name !== "spotdl");
   if (missing.length === 0) return null;
 
   const blocking = missing.some((t) => t.name === "yt-dlp");

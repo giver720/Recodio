@@ -258,20 +258,17 @@ impl Inner {
             }
         };
 
-        let result = if job.source == "spotdl" {
-            crate::spotdl::download(&job, &settings, &self.core.bins, token.clone(), on_progress)
-                .await
-        } else {
-            crate::ytdlp::download(
-                &job,
-                &settings,
-                &self.core.bins,
-                archive,
-                token.clone(),
-                on_progress,
-            )
-            .await
-        };
+        // Todo pasa por yt-dlp, incluida la música de Spotify: ver el comentario
+        // en `ytdlp::download`.
+        let result = crate::ytdlp::download(
+            &job,
+            &settings,
+            &self.core.bins,
+            archive,
+            token.clone(),
+            on_progress,
+        )
+        .await;
 
         match result {
             Ok(path) => {

@@ -34,7 +34,15 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
 
 ## Requisitos
 
-`yt-dlp`, `spotDL` y `ffmpeg` — pero **no hace falta instalarlas a mano**. Si
+`yt-dlp` y `ffmpeg` — pero **no hace falta instalarlas a mano**.
+
+> **spotDL ya no se usa para descargar.** Spotify no distribuye audio, así que
+> ningún programa baja «de Spotify»: todos localizan la canción en YouTube.
+> Recodio lee la lista desde Spotify y baja cada tema con yt-dlp, eligiendo el
+> resultado que cuadre en duración con el original. Así el progreso es real por
+> bytes, se aplican los mismos ajustes que al resto, y hay una dependencia menos.
+> spotDL queda como respaldo opcional del listado si Spotify cambia su página.
+ Si
 falta alguna, Recodio lo dice al abrir la pantalla de Descargar y ofrece
 descargárselas a su propia carpeta de datos, sin permisos de administrador y sin
 tocar el sistema. También están en **Ajustes › Herramientas**.

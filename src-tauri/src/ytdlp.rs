@@ -101,10 +101,22 @@ pub async fn download(
     let exe = bins.require("yt-dlp")?;
     let path_file = std::env::temp_dir().join(format!("recodio-path-{}.txt", job.id));
 
+    // Spotify no distribuye audio, así que ningún descargador baja "de Spotify":
+    // todos localizan la canción en YouTube. spotDL lo hacía por su cuenta, pero
+    // su resolución de enlaces está rota en la 4.5.2 y falla con `KeyError:
+    // 'uri'`. Como ya tenemos título, artista y duración, se busca con yt-dlp y
+    // se descarta lo que no cuadre en duración con lo que dice Spotify.
+    let es_spotify = job.entry.extractor == "spotify";
+
     let mut cmd = async_command(exe);
-    cmd.arg("--ignore-config")
-        .arg("--no-playlist")
-        .arg("--newline")
+    cmd.arg("--ignore-config").arg("--newline");
+
+    if !es_spotify {
+        // En una búsqueda esto dejaría solo el primer resultado, saltándose el
+        // filtro de duración.
+        cmd.arg("--no-playlist");
+    }
+    cmd
         // `--progress` guarantees progress lines even when other flags imply quiet.
         .arg("--progress")
         .arg("--no-simulate")
@@ -124,7 +136,18 @@ pub async fn download(
         .arg("--paths")
         .arg(&job.dest_dir)
         .arg("-o")
-        .arg(&settings.output_template)
+        .arg(if es_spotify {
+            // El vídeo de YouTube se llamará «El Gran Varon [US0GbUpQ9VU]»; en la
+            // biblioteca queremos «Willie Colón - El Gran Varón», que es lo que
+            // el usuario buscó. El `%` se escapa para que yt-dlp no lo lea como
+            // una plantilla.
+            format!(
+                "{}.%(ext)s",
+                crate::m3u::sanitize(&job.entry.title).replace('%', "%%")
+            )
+        } else {
+            settings.output_template.clone()
+        })
         .arg("--retries")
         .arg(settings.retries.to_string())
         .arg("--fragment-retries")
@@ -146,12 +169,25 @@ pub async fn download(
     apply_format_args(&mut cmd, settings, &job.kind);
     apply_extras_args(&mut cmd, settings, &job.kind);
 
-    let target = if job.entry.url.is_empty() {
-        &job.entry.source_id
+    let target = if es_spotify {
+        if let Some(segundos) = job.entry.duration.filter(|d| *d > 0.0) {
+            // ±20 s absorbe las diferencias entre la edición de Spotify y la de
+            // YouTube (intros, silencios finales) sin colar una versión en
+            // directo o un remix, que suelen diferir bastante más.
+            let minimo = (segundos - 20.0).max(0.0).round() as i64;
+            let maximo = (segundos + 20.0).round() as i64;
+            cmd.arg("--match-filter")
+                .arg(format!("duration>={minimo} & duration<={maximo}"));
+        }
+        // Sin esto se descargarían todos los resultados que pasen el filtro.
+        cmd.arg("--max-downloads").arg("1");
+        format!("ytsearch10:{}", search_query(&job.entry.title))
+    } else if job.entry.url.is_empty() {
+        job.entry.source_id.clone()
     } else {
-        &job.entry.url
+        job.entry.url.clone()
     };
-    cmd.arg(target);
+    cmd.arg(&target);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
@@ -197,18 +233,26 @@ pub async fn download(
         .next_back()
         .map(PathBuf::from);
 
-    if !status.success() {
-        // A non-zero exit with a real file usually means a cosmetic
-        // post-processing warning, so only fail when nothing landed.
-        if let Some(p) = final_path.filter(|p| p.exists()) {
-            return Ok(p);
-        }
+    // Un código distinto de cero con archivo en disco suele ser un aviso
+    // cosmético del post-procesado. Y con `--max-downloads` yt-dlp siempre
+    // termina en 101, aunque haya ido bien.
+    if let Some(p) = final_path.as_ref().filter(|p| p.exists()) {
+        return Ok(p.clone());
+    }
+
+    if !status.success() || es_spotify {
         let msg = crate::analyze::clean_ytdlp_error(&error_tail.join("\n"));
-        return Err(anyhow!(if msg.is_empty() {
-            format!("yt-dlp terminó con código {:?}", status.code())
-        } else {
-            msg
-        }));
+        if !msg.is_empty() {
+            return Err(anyhow!(msg));
+        }
+        if es_spotify {
+            return Err(anyhow!(
+                "No se encontró en YouTube ninguna versión de «{}» que cuadre en duración \
+                 con la de Spotify. Puede ser una pista muy rara, o estar solo en Spotify.",
+                job.entry.title
+            ));
+        }
+        return Err(anyhow!("yt-dlp terminó con código {:?}", status.code()));
     }
 
     final_path
@@ -267,6 +311,64 @@ fn handle_line(line: &str, on_progress: &mut impl FnMut(Progress), error_tail: &
         if error_tail.len() > 20 {
             error_tail.remove(0);
         }
+    }
+}
+
+/// Limpia el título antes de buscarlo. Las coletillas entre paréntesis o
+/// corchetes —«(Remastered 2019)», «[Official Video]»— estrechan la búsqueda
+/// hacia vídeos concretos y hacen perder la grabación que se quiere.
+fn search_query(titulo: &str) -> String {
+    let mut limpio = String::with_capacity(titulo.len());
+    let mut profundidad = 0i32;
+
+    for c in titulo.chars() {
+        match c {
+            '(' | '[' => profundidad += 1,
+            ')' | ']' => profundidad = (profundidad - 1).max(0),
+            _ if profundidad == 0 => limpio.push(c),
+            _ => {}
+        }
+    }
+
+    let limpio = limpio.trim();
+    if limpio.is_empty() {
+        titulo.to_string()
+    } else {
+        limpio.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn la_busqueda_quita_las_coletillas_del_titulo() {
+        // Buscar «(Remastered 2019)» o «[Official Video]» estrecha la búsqueda
+        // hacia un vídeo concreto y hace perder la grabación buscada.
+        let casos = [
+            ("Willie Colón - El Gran Varón", "Willie Colón - El Gran Varón"),
+            (
+                "Willie Colón - Idilio (Remastered 2019)",
+                "Willie Colón - Idilio",
+            ),
+            (
+                "Marshmello - Alone [Official Music Video]",
+                "Marshmello - Alone",
+            ),
+            ("Artista - Tema (feat. Otro) [Live]", "Artista - Tema"),
+        ];
+        for (entrada, esperado) in casos {
+            assert_eq!(search_query(entrada), esperado, "con: {entrada}");
+        }
+    }
+
+    /// Un título que sea *solo* un paréntesis quedaría vacío, y buscar la cadena
+    /// vacía devolvería cualquier cosa.
+    #[test]
+    fn nunca_devuelve_una_busqueda_vacia() {
+        assert_eq!(search_query("(Instrumental)"), "(Instrumental)");
+        assert_eq!(search_query(""), "");
     }
 }
 
