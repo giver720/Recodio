@@ -1,11 +1,11 @@
 use crate::binaries::Binaries;
 use crate::job::{Job, JobPhase, Progress};
-use crate::proc::async_command;
+use crate::proc::{async_command, LossyLines};
 use crate::settings::Settings;
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio_util::sync::CancellationToken;
 
 /// Marker prefixes so our machine-readable lines never collide with yt-dlp's
@@ -158,8 +158,8 @@ pub async fn download(
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let mut out_lines = BufReader::new(stdout).lines();
-    let mut err_lines = BufReader::new(stderr).lines();
+    let mut out_lines = LossyLines::new(BufReader::new(stdout));
+    let mut err_lines = LossyLines::new(BufReader::new(stderr));
     let mut error_tail: Vec<String> = Vec::new();
 
     let status = loop {

@@ -1,6 +1,6 @@
 [package]
 name = "recodio"
-version = "0.1.1"
+version = "0.1.2"
 description = "Descargador de vídeo y música con yt-dlp y spotDL"
 authors = ["Recodio"]
 edition = "2021"

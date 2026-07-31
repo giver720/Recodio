@@ -1,11 +1,11 @@
 use crate::binaries::Binaries;
 use crate::job::{Job, JobPhase, Progress};
-use crate::proc::async_command;
+use crate::proc::{async_command, LossyLines};
 use crate::settings::Settings;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio_util::sync::CancellationToken;
 
 const AUDIO_EXTS: [&str; 6] = ["mp3", "flac", "ogg", "opus", "m4a", "wav"];
@@ -87,8 +87,8 @@ pub async fn download(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
 
-    let mut out_lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    let mut err_lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut out_lines = LossyLines::new(BufReader::new(child.stdout.take().unwrap()));
+    let mut err_lines = LossyLines::new(BufReader::new(child.stderr.take().unwrap()));
     let mut log: Vec<String> = Vec::new();
 
     on_progress(Progress {

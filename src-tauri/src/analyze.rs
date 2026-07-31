@@ -358,7 +358,10 @@ async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
         return Err(anyhow!("spotdl no pudo leer el enlace: {}", msg.trim()));
     }
 
-    let raw = std::fs::read_to_string(&tmp)?;
+    // Lectura tolerante por el mismo motivo que la salida de los procesos: si
+    // spotDL escribiera el archivo en la codificación regional, un solo título
+    // con tilde tumbaría el análisis entero.
+    let raw = String::from_utf8_lossy(&std::fs::read(&tmp)?).into_owned();
     let _ = std::fs::remove_file(&tmp);
     let songs: Vec<Value> = serde_json::from_str(&raw)?;
 
