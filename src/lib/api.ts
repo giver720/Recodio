@@ -7,6 +7,7 @@ import type {
   LibraryItem,
   Platform,
   PlayerOption,
+  RepairReport,
   Playlist,
   PlaylistInfo,
   QueueStats,
@@ -60,6 +61,7 @@ export const api = {
   libraryDelete: (id: string, deleteFile: boolean) =>
     invoke<void>("library_delete", { id, deleteFile }),
   libraryPrune: () => invoke<number>("library_prune"),
+  libraryRepair: () => invoke<RepairReport>("library_repair"),
   exportM3u: (playlistId: string) =>
     invoke<string>("export_m3u", { playlistId }),
 

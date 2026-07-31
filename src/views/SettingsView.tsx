@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Gauge,
   Palette,
+  Wrench,
   RefreshCw,
   Shield,
   Sparkles,
@@ -19,7 +20,7 @@ import { UpdateCard } from "../components/UpdateCard";
 import { Button, Field, Select, Toggle, inputClass } from "../components/ui";
 import { api } from "../lib/api";
 import { useStore } from "../lib/store";
-import type { PlayerOption, Settings, ToolStatus } from "../lib/types";
+import type { PlayerOption, RepairReport, Settings, ToolStatus } from "../lib/types";
 
 const SPONSOR_CATEGORIES: { value: string; label: string }[] = [
   { value: "sponsor", label: "Patrocinios" },
@@ -40,6 +41,7 @@ export function SettingsView() {
   const [tools, setTools] = useState<ToolStatus[]>([]);
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState("");
+  const [repair, setRepair] = useState<RepairReport | null>(null);
 
   const [players, setPlayers] = useState<PlayerOption[]>([]);
 
@@ -418,6 +420,50 @@ export function SettingsView() {
             }}
           >
             <RefreshCw size={14} /> Actualizar yt-dlp
+          </Button>
+        </div>
+      </Section>
+
+      <Section icon={<Wrench size={16} />} title="Biblioteca">
+        <div className="flex items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-medium">Reparar entradas cruzadas</p>
+            <p className="text-[11.5px] leading-snug text-muted">
+              Hasta la versión 0.1.2, varias descargas simultáneas de Spotify podían
+              acabar con distintas canciones apuntando al mismo archivo, y al
+              reproducir una sonaba otra. Esto revisa la biblioteca y deja una sola
+              entrada por archivo, la que corresponde.{" "}
+              <strong className="text-fg/90">No se borra ningún archivo</strong>: la
+              música sigue en tu disco.
+            </p>
+            {repair && (
+              <p className="mt-1.5 text-[11.5px] text-ok">
+                {repair.removed === 0
+                  ? `Todo correcto: ${repair.checked} entradas revisadas, nada que arreglar.`
+                  : `${repair.removed} entradas corregidas de ${repair.checked}` +
+                    (repair.sharedFiles > 0
+                      ? ` · ${repair.sharedFiles} archivos estaban compartidos`
+                      : "") +
+                    (repair.missing > 0 ? ` · ${repair.missing} ya no existían` : "")}
+              </p>
+            )}
+          </div>
+          <Button
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const r = await api.libraryRepair();
+                setRepair(r);
+                useStore.setState((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+              } catch (e) {
+                toast("error", String(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <Wrench size={14} /> Revisar
           </Button>
         </div>
       </Section>

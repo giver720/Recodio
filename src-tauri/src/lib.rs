@@ -6,6 +6,7 @@ mod job;
 mod m3u;
 mod proc;
 mod queue;
+mod repair;
 mod settings;
 mod ytdlp;
 
@@ -216,6 +217,17 @@ fn library_delete(id: String, delete_file: bool, state: State<'_, AppState>) -> 
 #[tauri::command]
 fn library_prune(state: State<'_, AppState>) -> CmdResult<usize> {
     state.core.db.prune_missing().map_err(err)
+}
+
+/// Limpia las entradas que quedaron apuntando al archivo equivocado por el fallo
+/// de las versiones hasta la 0.1.2. No borra ningún archivo.
+#[tauri::command]
+async fn library_repair(state: State<'_, AppState>) -> CmdResult<repair::RepairReport> {
+    let core = state.core.clone();
+    tauri::async_runtime::spawn_blocking(move || repair::repair(&core.db))
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 /// Rewrite the playlist file on demand. Recodio already does this on its own
@@ -529,6 +541,7 @@ pub fn run() {
             library_items,
             library_delete,
             library_prune,
+            library_repair,
             export_m3u,
             play_file,
             reveal_file,

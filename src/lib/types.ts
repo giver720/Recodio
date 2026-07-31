@@ -1,5 +1,13 @@
 export type Platform = "windows" | "linux" | "macos";
 
+/** Resultado de limpiar la biblioteca. */
+export interface RepairReport {
+  checked: number;
+  removed: number;
+  sharedFiles: number;
+  missing: number;
+}
+
 /** Reproductor encontrado en el equipo. */
 export interface PlayerOption {
   name: string;
