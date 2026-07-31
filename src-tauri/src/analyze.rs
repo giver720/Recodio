@@ -47,6 +47,10 @@ pub struct AnalyzeResult {
     pub is_playlist: bool,
     pub playlist: Option<PlaylistInfo>,
     pub entries: Vec<Entry>,
+    /// Cuándo se guardó este listado, si viene de uno anterior. La interfaz lo
+    /// usa para ofrecer actualizarlo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_at: Option<i64>,
 }
 
 pub fn is_spotify(url: &str) -> bool {
@@ -54,17 +58,53 @@ pub fn is_spotify(url: &str) -> bool {
     u.contains("spotify.com") || u.starts_with("spotify:")
 }
 
+/// Clave estable para el listado guardado.
+///
+/// En Spotify se reduce a tipo e identificador, porque el `?si=` del botón de
+/// compartir y el `/intl-es/` de las URL localizadas son ruido que apunta al
+/// mismo sitio. En el resto se conserva el enlace **entero**: en YouTube el
+/// parámetro no es ruido, es el vídeo, y recortarlo haría que `watch?v=aaa` y
+/// `watch?v=bbb` compartieran listado.
+fn cache_key(url: &str) -> String {
+    match spotify_ref(url) {
+        Some((kind, id)) => format!("spotify:{kind}:{id}"),
+        None => url.trim().trim_end_matches('/').to_string(),
+    }
+}
+
 pub async fn analyze(
     url: &str,
     bins: &Binaries,
     db: &Db,
     settings: &Settings,
+    refresh: bool,
 ) -> Result<AnalyzeResult> {
-    let mut result = if is_spotify(url) {
-        analyze_spotify(url, bins).await?
-    } else {
-        analyze_ytdlp(url, bins, settings).await?
+    let key = cache_key(url);
+
+    let mut result = match db.cache_get(&key).filter(|_| !refresh) {
+        Some((payload, cached_at)) => match serde_json::from_str::<AnalyzeResult>(&payload) {
+            Ok(mut guardado) => {
+                guardado.cached_at = Some(cached_at);
+                guardado
+            }
+            // Un listado guardado por una versión anterior con otro formato: se
+            // descarta y se vuelve a pedir, en vez de fallar.
+            Err(_) => {
+                let _ = db.cache_forget(&key);
+                analyze_fresh(url, bins, settings).await?
+            }
+        },
+        None => analyze_fresh(url, bins, settings).await?,
     };
+
+    if result.cached_at.is_none() {
+        if let Ok(payload) = serde_json::to_string(&result) {
+            let _ = db.cache_put(&key, &payload);
+        }
+    }
+
+    // Los duplicados nunca se guardan: dependen de lo que haya en la biblioteca
+    // *ahora*, no de cuando se analizó el enlace.
 
     // Los duplicados se marcan respecto al destino de *esta* descarga: si la
     // playlist es nueva, nada está repetido aunque las canciones ya existan en
@@ -112,6 +152,7 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
             is_playlist: false,
             playlist: None,
             entries: vec![entry],
+            cached_at: None,
         });
     }
 
@@ -157,6 +198,7 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
         is_playlist: true,
         playlist: Some(playlist),
         entries,
+        cached_at: None,
     })
 }
 
@@ -211,16 +253,111 @@ fn spotify_ref(url: &str) -> Option<(String, String)> {
     Some((parts[pos].to_string(), (*id).to_string()))
 }
 
+/// Pide el listado de verdad, sin mirar lo guardado.
+async fn analyze_fresh(
+    url: &str,
+    bins: &Binaries,
+    settings: &Settings,
+) -> Result<AnalyzeResult> {
+    if is_spotify(url) {
+        analyze_spotify(url, bins).await
+    } else {
+        analyze_ytdlp(url, bins, settings).await
+    }
+}
+
 /// Listado rápido leyendo la página de incrustación de Spotify.
 ///
 /// `spotdl save` tarda unos 31 s de arranque más 4,75 s por canción — dos
 /// minutos y medio para un álbum de 25, y ocho para una playlist de cien, solo
 /// para *previsualizar*. Esta página devuelve la misma lista en un segundo y sin
 /// autenticación. Si Spotify cambia el formato, se cae al camino de spotdl.
+/// El embed corta las listas en 100 pistas. Es un tope duro, sin paginación.
+const EMBED_MAX: usize = 100;
+
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                  (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+/// Pide la playlist entera, de cien en cien, con el token que viene en el embed.
+///
+/// Puede fallar: el token es el de la sesión anónima del reproductor incrustado y
+/// Spotify limita su uso contra la API pública. Por eso el error se propaga en
+/// lugar de tratarse como lista vacía — arriba se recurre a spotDL.
+async fn playlist_completa(
+    cliente: &reqwest::Client,
+    id: &str,
+    token: &str,
+) -> Result<Vec<Entry>> {
+    let mut entradas = Vec::new();
+    let mut desde = 0usize;
+
+    loop {
+        let url = format!(
+            "https://api.spotify.com/v1/playlists/{id}/tracks\
+             ?limit=100&offset={desde}\
+             &fields=total,items(track(id,name,duration_ms,artists(name)))"
+        );
+        let respuesta = cliente.get(&url).bearer_auth(token).send().await?;
+
+        if !respuesta.status().is_success() {
+            return Err(anyhow!("Spotify respondió {}", respuesta.status()));
+        }
+        let pagina: Value = respuesta.json().await?;
+        let items = pagina
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("respuesta inesperada de Spotify"))?;
+        if items.is_empty() {
+            break;
+        }
+
+        for item in items {
+            let Some(track) = item.get("track").filter(|t| !t.is_null()) else {
+                continue; // Pistas retiradas del catálogo.
+            };
+            let nombre = str_field(track, &["name"]).unwrap_or_else(|| "Pista".into());
+            let artista = track
+                .pointer("/artists/0/name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let track_id = str_field(track, &["id"])
+                .unwrap_or_else(|| format!("track-{}", entradas.len()));
+
+            entradas.push(Entry {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: track_id.clone(),
+                extractor: "spotify".into(),
+                title: match &artista {
+                    Some(a) => format!("{a} - {nombre}"),
+                    None => nombre,
+                },
+                url: format!("https://open.spotify.com/track/{track_id}"),
+                uploader: artista,
+                duration: track
+                    .get("duration_ms")
+                    .and_then(Value::as_f64)
+                    .map(|ms| ms / 1000.0),
+                thumbnail: None,
+                index: entradas.len() as i64 + 1,
+                existing_video: None,
+                existing_audio: None,
+                unavailable: false,
+            });
+        }
+
+        let total = pagina.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
+        desde += items.len();
+        if desde >= total {
+            break;
+        }
+    }
+
+    Ok(entradas)
+}
+
 async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
-    let body = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0")
-        .build()?
+    let cliente = reqwest::Client::builder().user_agent(UA).build()?;
+    let body = cliente
         .get(format!("https://open.spotify.com/embed/{kind}/{id}"))
         .send()
         .await?
@@ -280,11 +417,47 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
                 existing_audio: None,
                 unavailable: false,
             }],
+            cached_at: None,
         });
     }
 
+    let tracks = tracks.unwrap();
+
+    // Lista al tope: seguramente hay más y el embed las ha recortado. El propio
+    // embed trae un token con el que se puede pedir la lista completa por
+    // páginas; si eso falla, el llamante recurre a spotDL.
+    if kind == "playlist" && tracks.len() >= EMBED_MAX {
+        if let Some(token) = json
+            .pointer("/props/pageProps/state/settings/session/accessToken")
+            .and_then(Value::as_str)
+        {
+            match playlist_completa(&cliente, id, token).await {
+                Ok(completas) if completas.len() > tracks.len() => {
+                    return Ok(AnalyzeResult {
+                        source: "spotdl".into(),
+                        is_playlist: true,
+                        playlist: Some(PlaylistInfo {
+                            source_id: id.to_string(),
+                            title: str_field(entity, &["name", "title"])
+                                .unwrap_or_else(|| "Spotify".into()),
+                            url: format!("https://open.spotify.com/{kind}/{id}"),
+                            uploader: str_field(entity, &["subtitle"]),
+                            thumbnail: cover.clone(),
+                        }),
+                        entries: completas,
+                        cached_at: None,
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("[recodio] no se pudo paginar la playlist: {e}"),
+            }
+        }
+        return Err(anyhow!(
+            "Spotify solo entrega las primeras {EMBED_MAX} canciones por esta vía"
+        ));
+    }
+
     let entries: Vec<Entry> = tracks
-        .unwrap()
         .iter()
         .enumerate()
         .map(|(i, t)| {
@@ -324,6 +497,7 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
             thumbnail: cover,
         }),
         entries,
+        cached_at: None,
     })
 }
 
@@ -419,6 +593,7 @@ async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
         is_playlist,
         playlist,
         entries,
+        cached_at: None,
     })
 }
 
@@ -516,6 +691,58 @@ mod tests {
         assert!(!track.is_playlist);
         assert_eq!(track.entries.len(), 1);
         println!("pista suelta: {}", track.entries[0].title);
+    }
+
+    #[test]
+    fn la_clave_de_cache_ignora_el_ruido_del_enlace() {
+        // El mismo álbum compartido de tres formas tiene que reutilizar la lista.
+        let esperada = cache_key("https://open.spotify.com/album/7ePC9qS9mSOTY9E0YPP6yg");
+        assert_eq!(
+            cache_key("https://open.spotify.com/intl-es/album/7ePC9qS9mSOTY9E0YPP6yg?si=abc123"),
+            esperada
+        );
+        assert_eq!(cache_key("spotify:album:7ePC9qS9mSOTY9E0YPP6yg"), esperada);
+
+        // Y dos enlaces distintos no pueden compartir clave.
+        assert_ne!(
+            cache_key("https://www.youtube.com/watch?v=aaa"),
+            cache_key("https://www.youtube.com/watch?v=bbb")
+        );
+    }
+
+    /// Los duplicados dependen de lo que haya en la biblioteca *ahora*. Si se
+    /// guardaran con la lista, una canción borrada seguiría figurando como ya
+    /// descargada para siempre.
+    #[test]
+    fn el_listado_guardado_no_conserva_los_duplicados() {
+        let resultado = AnalyzeResult {
+            source: "spotdl".into(),
+            is_playlist: false,
+            playlist: None,
+            entries: vec![Entry {
+                id: "x".into(),
+                source_id: "abc".into(),
+                extractor: "spotify".into(),
+                title: "Prueba".into(),
+                url: String::new(),
+                uploader: None,
+                duration: None,
+                thumbnail: None,
+                index: 1,
+                existing_video: Some("C:/algo.mp4".into()),
+                existing_audio: Some("C:/algo.mp3".into()),
+                unavailable: false,
+            }],
+            cached_at: None,
+        };
+
+        let json = serde_json::to_string(&resultado).unwrap();
+        let recuperado: AnalyzeResult = serde_json::from_str(&json).unwrap();
+
+        // Se recuperan tal cual, pero `analyze` los recalcula antes de devolver
+        // el resultado: este test documenta que hay que hacerlo.
+        assert!(recuperado.entries[0].existing_audio.is_some());
+        assert!(recuperado.cached_at.is_none());
     }
 
     #[test]

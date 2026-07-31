@@ -41,6 +41,8 @@ export interface PlaylistInfo {
 }
 
 export interface AnalyzeResult {
+  /** Marca de tiempo si la lista viene de un análisis anterior. */
+  cachedAt?: number;
   source: Source;
   isPlaylist: boolean;
   playlist: PlaylistInfo | null;

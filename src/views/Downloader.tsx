@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Film,
   FolderOpen,
+  History,
   Link2,
   ListChecks,
   Music,
@@ -75,7 +76,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     setOverwrite(ow);
   }
 
-  async function analyze() {
+  async function analyze(refresh = false) {
     const urls = url
       .split(/[\n\s]+/)
       .map((u) => u.trim())
@@ -88,7 +89,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     try {
       const results: AnalyzeResult[] = [];
       for (const u of urls) {
-        results.push(await api.analyzeUrl(u));
+        results.push(await api.analyzeUrl(u, refresh));
       }
       const merged: AnalyzeResult =
         results.length === 1
@@ -205,7 +206,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
           <IconButton title="Pegar del portapapeles" onClick={paste}>
             <ClipboardPaste size={16} />
           </IconButton>
-          <Button variant="primary" onClick={analyze} disabled={analyzing || !url.trim()}>
+          {/* Sin la lambda, React pasaría el evento del clic como `refresh`, que
+              es un objeto y por tanto siempre verdadero: nunca se usaría lo
+              guardado. */}
+          <Button
+            variant="primary"
+            onClick={() => analyze()}
+            disabled={analyzing || !url.trim()}
+          >
             {analyzing ? (
               <>
                 <Sparkles size={15} className="animate-pulse" /> Analizando…
@@ -227,6 +235,19 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
           title="Pega un enlace para empezar"
           body="Recodio usa yt-dlp, así que funciona con miles de sitios: YouTube, Twitch, X, TikTok, Vimeo, Instagram… y spotDL para Spotify."
         />
+      )}
+
+      {result?.cachedAt && (
+        <div className="flex items-center gap-2 rounded-xl border border-line bg-surface2 px-3 py-2 text-[12px] text-muted">
+          <History size={14} className="shrink-0" />
+          <span className="min-w-0 flex-1">
+            Lista guardada de hace {sinceText(result.cachedAt)}. Si has añadido
+            canciones desde entonces, actualízala.
+          </span>
+          <Button onClick={() => analyze(true)} disabled={analyzing}>
+            <RotateCcw size={13} /> Actualizar
+          </Button>
+        </div>
       )}
 
       {result && (
@@ -482,6 +503,18 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       {menu}
     </div>
   );
+}
+
+/** «hace 3 minutos», «hace 2 días»: sin precisión falsa. */
+function sinceText(epochSeconds: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (s < 90) return "un momento";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minutos`;
+  const h = Math.round(m / 60);
+  if (h < 36) return h === 1 ? "una hora" : `${h} horas`;
+  const d = Math.round(h / 24);
+  return d === 1 ? "un día" : `${d} días`;
 }
 
 /**

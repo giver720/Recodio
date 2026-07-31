@@ -17,7 +17,9 @@ import type {
 } from "./types";
 
 export const api = {
-  analyzeUrl: (url: string) => invoke<AnalyzeResult>("analyze_url", { url }),
+  /** `refresh` ignora el listado guardado y vuelve a pedirlo. */
+  analyzeUrl: (url: string, refresh = false) =>
+    invoke<AnalyzeResult>("analyze_url", { url, refresh }),
 
   enqueue: (req: {
     entries: Entry[];

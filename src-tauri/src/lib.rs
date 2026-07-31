@@ -36,12 +36,22 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 // ---------------------------------------------------------------- análisis
 
 #[tauri::command]
-async fn analyze_url(url: String, state: State<'_, AppState>) -> CmdResult<AnalyzeResult> {
+async fn analyze_url(
+    url: String,
+    refresh: Option<bool>,
+    state: State<'_, AppState>,
+) -> CmdResult<AnalyzeResult> {
     let core = state.core.clone();
     let settings = core.settings.read().unwrap().clone();
-    analyze::analyze(url.trim(), &core.bins, &core.db, &settings)
-        .await
-        .map_err(err)
+    analyze::analyze(
+        url.trim(),
+        &core.bins,
+        &core.db,
+        &settings,
+        refresh.unwrap_or(false),
+    )
+    .await
+    .map_err(err)
 }
 
 // ------------------------------------------------------------------- cola

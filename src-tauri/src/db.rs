@@ -148,6 +148,15 @@ impl Db {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_items_unicos
                 ON items(extractor, source_id, kind, COALESCE(playlist_id, ''));
 
+            -- Listados ya analizados. Volver a pedir una playlist de cientos de
+            -- temas cuesta minutos si hay que recurrir a spotDL, y su contenido
+            -- rara vez cambia entre dos intentos seguidos.
+            CREATE TABLE IF NOT EXISTS analysis_cache (
+                key       TEXT PRIMARY KEY,
+                payload   TEXT NOT NULL,
+                cached_at INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_items_playlist ON items(playlist_id);
             CREATE INDEX IF NOT EXISTS idx_items_lookup   ON items(extractor, source_id);
             CREATE INDEX IF NOT EXISTS idx_items_title    ON items(title);
@@ -356,6 +365,36 @@ impl Db {
                 let _ = std::fs::remove_file(p);
             }
         }
+        Ok(())
+    }
+
+    /// Devuelve el listado guardado y cuándo se guardó.
+    pub fn cache_get(&self, key: &str) -> Option<(String, i64)> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT payload, cached_at FROM analysis_cache WHERE key = ?1",
+            params![key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn cache_put(&self, key: &str, payload: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO analysis_cache (key, payload, cached_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET payload = excluded.payload,
+                                            cached_at = excluded.cached_at",
+            params![key, payload, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    pub fn cache_forget(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM analysis_cache WHERE key = ?1", params![key])?;
         Ok(())
     }
 
