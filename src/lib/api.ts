@@ -69,7 +69,8 @@ export const api = {
   appPlatform: () => invoke<Platform>("app_platform"),
   detectPlayers: () => invoke<PlayerOption[]>("detect_players"),
 
-  toolsStatus: () => invoke<ToolStatus[]>("tools_status"),
+  /** `force` vuelve a lanzar las herramientas; sin él se usa lo ya averiguado. */
+  toolsStatus: (force = false) => invoke<ToolStatus[]>("tools_status", { force }),
   toolsInstall: (name: string) => invoke<string>("tools_install", { name }),
   toolsUpdateYtdlp: () => invoke<string>("tools_update_ytdlp"),
 };

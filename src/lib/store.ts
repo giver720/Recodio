@@ -50,7 +50,7 @@ export const useStore = create<State>((set, get) => ({
   libraryVersion: 0,
   tools: [],
 
-  refreshTools: async () => set({ tools: await api.toolsStatus() }),
+  refreshTools: async () => set({ tools: await api.toolsStatus(true) }),
 
   init: async () => {
     const [settings, jobs, stats, platform, tools] = await Promise.all([

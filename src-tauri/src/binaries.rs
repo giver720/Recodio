@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// copy is missing we fall back to whatever is on PATH.
 pub struct Binaries {
     dir: PathBuf,
+    /// Averiguar la versión cuesta un proceso por herramienta, y spotDL tarda
+    /// más de tres segundos en arrancar. Sin recordar el resultado, abrir
+    /// Ajustes se quedaba pensando cinco segundos cada vez.
+    cache: std::sync::Mutex<Option<Vec<ToolStatus>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,7 +32,10 @@ const EXE: &str = "";
 impl Binaries {
     pub fn new(dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&dir);
-        Self { dir }
+        Self {
+            dir,
+            cache: std::sync::Mutex::new(None),
+        }
     }
 
     fn managed_path(&self, name: &str) -> PathBuf {
@@ -73,7 +80,8 @@ impl Binaries {
             };
         };
         let managed = path.starts_with(&self.dir);
-        let version = std::process::Command::new(&path)
+        // Sin `proc::command` cada comprobación abría una ventana de consola.
+        let version = crate::proc::command(&path)
             .arg(version_arg)
             .output()
             .ok()
@@ -95,12 +103,41 @@ impl Binaries {
         }
     }
 
+    /// Estado de las tres herramientas, reutilizando lo ya averiguado.
     pub fn status_all(&self) -> Vec<ToolStatus> {
-        vec![
-            self.status("yt-dlp", "--version"),
-            self.status("spotdl", "--version"),
-            self.status("ffmpeg", "-version"),
-        ]
+        if let Some(guardado) = self.cache.lock().unwrap().clone() {
+            return guardado;
+        }
+        self.refresh_status()
+    }
+
+    /// Vuelve a preguntar a las herramientas, ignorando lo recordado. Es lo que
+    /// hay que llamar después de instalar o actualizar alguna.
+    pub fn refresh_status(&self) -> Vec<ToolStatus> {
+        // En paralelo: en serie son más de cinco segundos, y las tres esperas
+        // son de arranque de proceso, no de CPU.
+        let estados = std::thread::scope(|scope| {
+            let hilos: Vec<_> = [
+                ("yt-dlp", "--version"),
+                ("spotdl", "--version"),
+                ("ffmpeg", "-version"),
+            ]
+            .into_iter()
+            .map(|(nombre, arg)| scope.spawn(move || self.status(nombre, arg)))
+            .collect();
+
+            hilos
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect::<Vec<_>>()
+        });
+
+        *self.cache.lock().unwrap() = Some(estados.clone());
+        estados
+    }
+
+    fn invalidar_cache(&self) {
+        *self.cache.lock().unwrap() = None;
     }
 
     /// Instala una herramienta en la carpeta propia de Recodio, sin tocar el
@@ -138,6 +175,7 @@ impl Binaries {
         let _ = std::fs::remove_file(&dest);
         std::fs::rename(&temp, &dest)?;
         make_executable(&dest)?;
+        self.invalidar_cache();
         Ok(dest.to_string_lossy().into_owned())
     }
 
@@ -191,6 +229,7 @@ impl Binaries {
         if instalados == 0 {
             return Err(anyhow!("El paquete de ffmpeg no contenía los ejecutables esperados"));
         }
+        self.invalidar_cache();
         Ok(self.dir.join(format!("ffmpeg{EXE}")).to_string_lossy().into_owned())
     }
 
@@ -198,7 +237,8 @@ impl Binaries {
     /// of YouTube changes.
     pub fn update_ytdlp(&self) -> Result<String> {
         let path = self.require("yt-dlp")?;
-        let out = std::process::Command::new(path).arg("-U").output()?;
+        let out = crate::proc::command(path).arg("-U").output()?;
+        self.invalidar_cache();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -274,6 +314,36 @@ mod tests {
         assert!(dir.join(format!("ffprobe{EXE}")).is_file(), "falta ffprobe");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Mide lo que costaba abrir Ajustes. Necesita las herramientas instaladas
+    /// para ser representativo, así que no corre en la suite normal:
+    ///     cargo test --lib -- --ignored --nocapture comprobacion
+    #[test]
+    #[ignore]
+    fn la_comprobacion_es_rapida_la_segunda_vez() {
+        use std::time::Instant;
+        let bins = Binaries::new(std::env::temp_dir().join("recodio-cache-test"));
+
+        let t = Instant::now();
+        let primera = bins.refresh_status();
+        let en_frio = t.elapsed();
+
+        let t = Instant::now();
+        let segunda = bins.status_all();
+        let en_caliente = t.elapsed();
+
+        println!("  en frío (en paralelo): {en_frio:?}");
+        println!("  recordado:             {en_caliente:?}");
+        for e in &primera {
+            println!("    {:8} {}", e.name, if e.found { "sí" } else { "no" });
+        }
+
+        assert_eq!(primera.len(), segunda.len());
+        assert!(
+            en_caliente < en_frio / 10,
+            "recordar el resultado debería ser al menos diez veces más rápido"
+        );
     }
 
     #[test]

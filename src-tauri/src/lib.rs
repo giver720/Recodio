@@ -437,9 +437,21 @@ fn app_platform() -> &'static str {
 
 // -------------------------------------------------------- herramientas
 
+/// Comprobar las herramientas cuesta un proceso por cada una. Va en un hilo
+/// aparte para no congelar la interfaz, y `force` distingue entre mirar lo ya
+/// sabido y volver a preguntar de verdad.
 #[tauri::command]
-fn tools_status(state: State<'_, AppState>) -> Vec<ToolStatus> {
-    state.core.bins.status_all()
+async fn tools_status(force: bool, state: State<'_, AppState>) -> CmdResult<Vec<ToolStatus>> {
+    let core = state.core.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if force {
+            core.bins.refresh_status()
+        } else {
+            core.bins.status_all()
+        }
+    })
+    .await
+    .map_err(err)
 }
 
 /// Instala una herramienta en la carpeta de Recodio. Emite `tool-install-progress`
