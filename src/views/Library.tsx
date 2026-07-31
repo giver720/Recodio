@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Copy,
   ExternalLink,
   FileVideo,
@@ -18,7 +19,7 @@ import { EmptyState, IconButton, inputClass } from "../components/ui";
 import { api } from "../lib/api";
 import { bytes, duration, relativeDate } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { LibraryItem, Playlist } from "../lib/types";
+import type { LibraryItem, Playlist, RepairReport } from "../lib/types";
 
 type Bucket = { id: string; label: string; icon: ReactNode; count?: number };
 
@@ -32,6 +33,8 @@ export function Library() {
   const [bucket, setBucket] = useState("all");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [health, setHealth] = useState<RepairReport | null>(null);
+  const [fixing, setFixing] = useState(false);
 
   const playlistId = playlists.find((p) => p.id === bucket)?.id ?? null;
 
@@ -61,6 +64,12 @@ export function Library() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
+
+  useEffect(() => {
+    // Se comprueba al abrir la pestaña: una herramienta escondida en Ajustes no
+    // la encuentra quien tiene el problema.
+    api.libraryHealth().then(setHealth).catch(() => setHealth(null));
+  }, [libraryVersion]);
 
   const shown = useMemo(() => {
     if (bucket === "video") return items.filter((i) => i.kind === "video");
@@ -160,6 +169,53 @@ export function Library() {
             <RefreshCw size={15} />
           </IconButton>
         </div>
+
+        {health && health.removed > 0 && (
+          <div className="mx-6 mt-4 flex items-start gap-3 rounded-2xl border border-warn/40 bg-warn/5 p-3.5">
+            <AlertTriangle size={17} className="mt-0.5 shrink-0 text-warn" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium">
+                {health.sharedFiles > 0
+                  ? "Hay canciones apuntando al archivo equivocado"
+                  : "Hay entradas cuyos archivos ya no existen"}
+              </p>
+              <p className="text-[11.5px] leading-snug text-muted">
+                {health.sharedFiles > 0 && (
+                  <>
+                    {health.sharedFiles} archivos tienen más de una canción asignada, así
+                    que al reproducir unas suena otra. Es secuela de un fallo de las
+                    versiones anteriores a la 0.1.3.{" "}
+                  </>
+                )}
+                Se corregirían {health.removed} de {health.checked} entradas.{" "}
+                <strong className="text-fg/90">No se borra ningún archivo.</strong>
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={fixing}
+              onClick={async () => {
+                setFixing(true);
+                try {
+                  const r = await api.libraryRepair();
+                  toast(
+                    "success",
+                    `${r.removed} entradas corregidas. Vuelve a analizar tus playlists para recuperar lo que falte.`,
+                  );
+                  setHealth(await api.libraryHealth());
+                  refresh();
+                } catch (e) {
+                  toast("error", String(e));
+                } finally {
+                  setFixing(false);
+                }
+              }}
+              className="shrink-0 rounded-xl bg-warn/20 px-3 py-1.5 text-[12px] font-medium text-warn transition hover:bg-warn/30 disabled:opacity-50"
+            >
+              {fixing ? "Corrigiendo…" : "Corregir"}
+            </button>
+          </div>
+        )}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           {loading && shown.length === 0 ? (

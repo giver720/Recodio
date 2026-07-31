@@ -209,6 +209,25 @@ impl Db {
         }
     }
 
+    /// Otras canciones que ya estén usando ese mismo archivo.
+    ///
+    /// Es la red de seguridad contra el fallo que cruzó bibliotecas enteras: si
+    /// una descarga acaba señalando un archivo que ya pertenece a otra canción,
+    /// hay que enterarse antes de guardarlo, no cuando el usuario le da al play.
+    pub fn others_using_file(&self, file_path: &str, source_id: &str) -> Vec<String> {
+        let Ok(conn) = self.conn.lock() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT title FROM items WHERE file_path = ?1 AND source_id <> ?2 LIMIT 5",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![file_path, source_id], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     pub fn upsert_item(&self, item: &LibraryItem) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -495,6 +514,29 @@ mod tests {
         db.upsert_item(&item("cancion1", Some(&gimnasio), dir)).unwrap();
         assert_eq!(db.list_items(Some(&fiesta), None).unwrap().len(), 1);
         assert_eq!(db.list_items(Some(&gimnasio), None).unwrap().len(), 1);
+
+        std::fs::remove_file(&ruta).ok();
+    }
+
+    /// La red de seguridad: si una descarga acaba apuntando a un archivo que ya
+    /// es de otra canción, hay que detectarlo antes de guardarlo.
+    #[test]
+    fn detecta_que_el_archivo_ya_es_de_otra_cancion() {
+        let (db, ruta) = db_temporal();
+        let dir = ruta.parent().unwrap();
+
+        let primera = item("cancion1", None, dir);
+        db.upsert_item(&primera).unwrap();
+
+        // Otra canción distinta señalando el mismo archivo: eso es el fallo.
+        let intrusas = db.others_using_file(&primera.file_path, "cancion2");
+        assert_eq!(intrusas.len(), 1);
+        assert_eq!(intrusas[0], "cancion1");
+
+        // La propia canción reescribiéndose no es una colisión.
+        assert!(db
+            .others_using_file(&primera.file_path, "cancion1")
+            .is_empty());
 
         std::fs::remove_file(&ruta).ok();
     }

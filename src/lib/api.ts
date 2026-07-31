@@ -64,6 +64,7 @@ export const api = {
     invoke<void>("library_delete", { id, deleteFile }),
   libraryPrune: () => invoke<number>("library_prune"),
   libraryRepair: () => invoke<RepairReport>("library_repair"),
+  libraryHealth: () => invoke<RepairReport>("library_health"),
   exportM3u: (playlistId: string) =>
     invoke<string>("export_m3u", { playlistId }),
 

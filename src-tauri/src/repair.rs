@@ -73,6 +73,34 @@ fn nombre_de(item: &LibraryItem) -> String {
         .unwrap_or_default()
 }
 
+/// Cuenta el daño sin tocar nada, para poder avisar sin que el usuario tenga que
+/// ir a buscar la herramienta a Ajustes.
+pub fn health(db: &Db) -> Result<RepairReport> {
+    let items = db.list_items(None, None)?;
+    let mut informe = RepairReport {
+        checked: items.len(),
+        ..Default::default()
+    };
+
+    let mut por_archivo: HashMap<String, usize> = HashMap::new();
+    for item in &items {
+        if !Path::new(&item.file_path).exists() {
+            informe.missing += 1;
+            continue;
+        }
+        *por_archivo.entry(item.file_path.to_lowercase()).or_default() += 1;
+    }
+
+    for cuantas in por_archivo.values() {
+        if *cuantas > 1 {
+            informe.shared_files += 1;
+            informe.removed += cuantas - 1; // Lo que se quitaría al reparar.
+        }
+    }
+    informe.removed += informe.missing;
+    Ok(informe)
+}
+
 /// Deja una sola entrada por archivo: la que mejor case con su nombre. Las demás
 /// se borran de la biblioteca, **sin tocar los archivos**: quien tenga la música
 /// en disco la conserva, solo deja de aparecer bajo un título que no era el suyo.

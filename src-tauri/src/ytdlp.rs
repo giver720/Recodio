@@ -141,10 +141,15 @@ pub async fn download(
             // biblioteca queremos «Willie Colón - El Gran Varón», que es lo que
             // el usuario buscó. El `%` se escapa para que yt-dlp no lo lea como
             // una plantilla.
-            format!(
-                "{}.%(ext)s",
-                crate::m3u::sanitize(&job.entry.title).replace('%', "%%")
-            )
+            let base = crate::m3u::sanitize(&job.entry.title).replace('%', "%%");
+            match job.playlist_id {
+                // Dentro de una playlist, el número de orden delante. Hace dos
+                // cosas: los archivos quedan ordenados en la carpeta como en la
+                // lista original, y dos canciones que se llamen igual dejan de
+                // poder pisarse, que es como una acababa apuntando a la otra.
+                Some(_) => format!("{:03} - {}.%(ext)s", job.entry.index, base),
+                None => format!("{base}.%(ext)s"),
+            }
         } else {
             settings.output_template.clone()
         })

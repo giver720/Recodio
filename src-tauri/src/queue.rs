@@ -272,6 +272,33 @@ impl Inner {
 
         match result {
             Ok(path) => {
+                // Antes de guardar nada: si ese archivo ya es de otra canción,
+                // algo ha salido mal y guardarlo dejaría la biblioteca cruzada.
+                // Mejor un error visible que un play que suena a otra cosa.
+                let ruta = path.to_string_lossy().into_owned();
+                let ocupado = self
+                    .core
+                    .db
+                    .others_using_file(&ruta, &job.entry.source_id);
+                if !ocupado.is_empty() {
+                    self.finish(
+                        &id,
+                        JobStatus::Failed,
+                        None,
+                        None,
+                        Some(format!(
+                            "El archivo obtenido ya pertenece a «{}». No se guarda para no \
+                             cruzar la biblioteca; vuelve a intentarlo.",
+                            ocupado.join("», «")
+                        )),
+                    );
+                    self.cancels.lock().unwrap().remove(&id);
+                    if let Some(playlist_id) = job.playlist_id.as_deref() {
+                        self.write_playlist_when_complete(playlist_id);
+                    }
+                    return;
+                }
+
                 let size = std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
                 let ext = path
                     .extension()

@@ -229,6 +229,17 @@ fn library_prune(state: State<'_, AppState>) -> CmdResult<usize> {
     state.core.db.prune_missing().map_err(err)
 }
 
+/// Revisa la biblioteca sin modificarla, para poder avisar de que hay entradas
+/// cruzadas en cuanto se abre la pestaña.
+#[tauri::command]
+async fn library_health(state: State<'_, AppState>) -> CmdResult<repair::RepairReport> {
+    let core = state.core.clone();
+    tauri::async_runtime::spawn_blocking(move || repair::health(&core.db))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 /// Limpia las entradas que quedaron apuntando al archivo equivocado por el fallo
 /// de las versiones hasta la 0.1.2. No borra ningún archivo.
 #[tauri::command]
@@ -552,6 +563,7 @@ pub fn run() {
             library_delete,
             library_prune,
             library_repair,
+            library_health,
             export_m3u,
             play_file,
             reveal_file,
