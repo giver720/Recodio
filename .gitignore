@@ -29,3 +29,6 @@ dist-linux
 *.njsproj
 *.sln
 *.sw?
+
+# Manifiesto del actualizador: se genera al publicar
+latest.json
