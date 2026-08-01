@@ -316,12 +316,20 @@ async fn library_health(state: State<'_, AppState>) -> CmdResult<repair::RepairR
 /// Limpia las entradas que quedaron apuntando al archivo equivocado por el fallo
 /// de las versiones hasta la 0.1.2. No borra ningún archivo.
 #[tauri::command]
-async fn library_repair(state: State<'_, AppState>) -> CmdResult<repair::RepairReport> {
+async fn library_repair(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<repair::RepairReport> {
+    use tauri::Emitter;
     let core = state.core.clone();
-    tauri::async_runtime::spawn_blocking(move || repair::repair(&core.db))
-        .await
-        .map_err(err)?
-        .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || {
+        repair::repair(&core.db, &core.bins, |hechos, total| {
+            let _ = app.emit("repair-progress", (hechos, total));
+        })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 /// Rewrite the playlist file on demand. Recodio already does this on its own

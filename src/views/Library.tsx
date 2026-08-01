@@ -40,6 +40,7 @@ export function Library() {
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<RepairReport | null>(null);
   const [fixing, setFixing] = useState(false);
+  const [fixProgress, setFixProgress] = useState<{ done: number; total: number } | null>(null);
   const [importing, setImporting] = useState<{ done: number; total: number } | null>(null);
 
   useEffect(() => {
@@ -47,8 +48,13 @@ export function Library() {
       const [done, total] = e.payload;
       setImporting({ done, total });
     });
+    const rep = listen<[number, number]>("repair-progress", (e) => {
+      const [done, total] = e.payload;
+      setFixProgress({ done, total });
+    });
     return () => {
       un.then((f) => f());
+      rep.then((f) => f());
     };
   }, []);
 
@@ -277,7 +283,9 @@ export function Library() {
                     versiones anteriores a la 0.1.3.{" "}
                   </>
                 )}
-                Se corregirían {health.removed} de {health.checked} entradas.{" "}
+                Revisar comprueba la duración de cada archivo y quita solo las
+                entradas que no le corresponden; las que sí, aunque compartan
+                archivo con otra playlist, se quedan.{" "}
                 <strong className="text-fg/90">No se borra ningún archivo.</strong>
               </p>
             </div>
@@ -290,7 +298,10 @@ export function Library() {
                   const r = await api.libraryRepair();
                   toast(
                     "success",
-                    `${r.removed} entradas corregidas. Vuelve a analizar tus playlists para recuperar lo que falte.`,
+                    r.removed === 0
+                      ? "Todo correcto: cada canción apunta a su archivo"
+                      : `${r.removed} entradas quitadas: no correspondían a su archivo. ` +
+                        "Vuelve a analizar esas playlists para descargar lo que falte.",
                   );
                   setHealth(await api.libraryHealth());
                   refresh();
@@ -298,11 +309,16 @@ export function Library() {
                   toast("error", String(e));
                 } finally {
                   setFixing(false);
+                  setFixProgress(null);
                 }
               }}
               className="shrink-0 rounded-xl bg-warn/20 px-3 py-1.5 text-[12px] font-medium text-warn transition hover:bg-warn/30 disabled:opacity-50"
             >
-              {fixing ? "Corrigiendo…" : "Corregir"}
+              {fixing
+                ? fixProgress && fixProgress.total > 0
+                  ? `${Math.round((fixProgress.done / fixProgress.total) * 100)}%`
+                  : "Revisando…"
+                : "Revisar"}
             </button>
           </div>
         )}

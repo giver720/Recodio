@@ -431,8 +431,9 @@ export function SettingsView() {
             <p className="text-[11.5px] leading-snug text-muted">
               Hasta la versión 0.1.2, varias descargas simultáneas de Spotify podían
               acabar con distintas canciones apuntando al mismo archivo, y al
-              reproducir una sonaba otra. Esto revisa la biblioteca y deja una sola
-              entrada por archivo, la que corresponde.{" "}
+              reproducir una sonaba otra. Esto compara la duración de cada archivo
+              con la que debería tener y quita solo las entradas que no le
+              corresponden.{" "}
               <strong className="text-fg/90">No se borra ningún archivo</strong>: la
               música sigue en tu disco.
             </p>
@@ -440,9 +441,9 @@ export function SettingsView() {
               <p className="mt-1.5 text-[11.5px] text-ok">
                 {repair.removed === 0
                   ? `Todo correcto: ${repair.checked} entradas revisadas, nada que arreglar.`
-                  : `${repair.removed} entradas corregidas de ${repair.checked}` +
-                    (repair.sharedFiles > 0
-                      ? ` · ${repair.sharedFiles} archivos estaban compartidos`
+                  : `${repair.removed} de ${repair.checked} entradas quitadas` +
+                    (repair.mismatched > 0
+                      ? ` · ${repair.mismatched} no correspondían a su archivo`
                       : "") +
                     (repair.missing > 0 ? ` · ${repair.missing} ya no existían` : "")}
               </p>

@@ -6,6 +6,8 @@ export interface RepairReport {
   removed: number;
   sharedFiles: number;
   missing: number;
+  /** Entradas cuya duración no cuadraba con el archivo: no eran suyas. */
+  mismatched: number;
 }
 
 /** Resultado de escanear una carpeta del equipo. */
