@@ -24,6 +24,9 @@ const COMANDOS: Record<Platform, Record<string, string>> = {
     ffmpeg: "brew install ffmpeg",
     spotdl: "pipx install spotdl",
   },
+  // En Android no hay comandos que copiar: no existe una terminal donde
+  // ejecutarlos ni forma de instalar estas herramientas en el sistema.
+  android: { "yt-dlp": "", ffmpeg: "", spotdl: "" },
 };
 
 const PARA_QUE: Record<string, string> = {
@@ -66,6 +69,30 @@ export function MissingTools({ tools }: { tools: ToolStatus[] }) {
   // spotDL dejó de hacer falta para descargar: la música de Spotify se baja con
   // yt-dlp. Avisar de que «falta» sería alarmar por nada.
   const missing = tools.filter((t) => !t.found && t.name !== "spotdl");
+
+  // En Android las descargas todavía no existen: yt-dlp es Python y no se puede
+  // ejecutar como en escritorio. Decirlo de frente es mejor que un «no se
+  // encontró yt-dlp» que invita a instalar algo imposible.
+  if (platform === "android") {
+    if (missing.length === 0) return null;
+    return (
+      <div className="rc-card flex items-start gap-2.5 border border-warn/30 p-4">
+        <AlertTriangle size={17} className="mt-0.5 shrink-0 text-warn" />
+        <div className="min-w-0">
+          <p className="text-[13.5px] font-medium">
+            Las descargas todavía no funcionan en Android
+          </p>
+          <p className="text-[12px] leading-snug text-muted">
+            Recodio descarga lanzando yt-dlp, que en un móvil no se puede ejecutar
+            como en un ordenador. Está en camino. Mientras tanto puedes usar la
+            biblioteca y el reproductor con la música que ya tengas en el
+            dispositivo.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (missing.length === 0) return null;
 
   const blocking = missing.some((t) => t.name === "yt-dlp");

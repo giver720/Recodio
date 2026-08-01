@@ -1,4 +1,4 @@
-export type Platform = "windows" | "linux" | "macos";
+export type Platform = "windows" | "linux" | "macos" | "android";
 
 /** Resultado de limpiar la biblioteca. */
 export interface RepairReport {

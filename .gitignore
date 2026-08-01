@@ -32,3 +32,6 @@ dist-linux
 
 # Manifiesto del actualizador: se genera al publicar
 latest.json
+
+# Proyecto de Android generado por Tauri: se reconstruye con `tauri android init`
+src-tauri/gen/apple
