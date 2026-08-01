@@ -4,6 +4,7 @@ import {
   Maximize2,
   Music,
   MonitorPlay,
+  Ratio,
   Pause,
   Play,
   Repeat,
@@ -17,7 +18,14 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { isVideo, mediaSrc, usePlayer } from "../lib/player";
+import {
+  FIT_HINTS,
+  FIT_LABELS,
+  isVideo,
+  mediaSrc,
+  usePlayer,
+  type FitMode,
+} from "../lib/player";
 import { useStore } from "../lib/store";
 
 /** mm:ss, o h:mm:ss si pasa de la hora. */
@@ -177,7 +185,18 @@ export function Player() {
     <video
       ref={ref}
       src={mediaSrc(item.filePath)}
-      className={p.expanded && esVideo ? "max-h-full max-w-full" : "hidden"}
+      className={
+        p.expanded && esVideo
+          ? `h-full w-full ${
+              {
+                contain: "object-contain",
+                cover: "object-cover",
+                fill: "object-fill",
+                none: "object-none",
+              }[p.fit]
+            }`
+          : "hidden"
+      }
       onTimeUpdate={(e) =>
         p.reportTime(e.currentTarget.currentTime, e.currentTarget.duration || 0)
       }
@@ -275,6 +294,21 @@ export function Player() {
     </Boton>
   ) : null;
 
+  const ajuste = esVideo && p.expanded ? (
+    <button
+      type="button"
+      title={`Encaje del vídeo: ${FIT_LABELS[p.fit]} — ${FIT_HINTS[p.fit]}`}
+      onClick={() => {
+        const orden: FitMode[] = ["contain", "cover", "fill", "none"];
+        p.setFit(orden[(orden.indexOf(p.fit) + 1) % orden.length]);
+      }}
+      className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11.5px] text-muted transition hover:bg-white/10 hover:text-fg"
+    >
+      <Ratio size={15} />
+      {FIT_LABELS[p.fit]}
+    </button>
+  ) : null;
+
   const volumen = (
     <div className="flex items-center gap-1.5">
       <Boton title={p.muted ? "Quitar silencio" : "Silenciar"} onClick={p.toggleMute}>
@@ -336,6 +370,7 @@ export function Player() {
             <div className="flex-1">{volumen}</div>
             {controles}
             <div className="flex flex-1 items-center justify-end gap-1">
+              {ajuste}
               {modoAudio}
               <Velocidad rate={p.rate} onChange={p.setRate} />
             </div>

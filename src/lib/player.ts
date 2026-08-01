@@ -4,6 +4,23 @@ import type { LibraryItem } from "./types";
 
 export type RepeatMode = "off" | "all" | "one";
 
+/** Cómo encaja el vídeo en la ventana. */
+export type FitMode = "contain" | "cover" | "fill" | "none";
+
+export const FIT_LABELS: Record<FitMode, string> = {
+  contain: "Ajustar",
+  cover: "Llenar",
+  fill: "Estirar",
+  none: "Tamaño real",
+};
+
+export const FIT_HINTS: Record<FitMode, string> = {
+  contain: "Se ve entero, con bandas si hace falta",
+  cover: "Llena la ventana recortando los bordes",
+  fill: "Llena la ventana deformando la imagen",
+  none: "Los píxeles del archivo, sin escalar",
+};
+
 interface PlayerState {
   /** Lo que suena ahora. */
   current: LibraryItem | null;
@@ -24,6 +41,8 @@ interface PlayerState {
   expanded: boolean;
   /** Escuchar un vídeo sin verlo, como si fuera una canción. */
   audioOnly: boolean;
+  /** Cómo encaja el vídeo en la ventana ampliada. */
+  fit: FitMode;
 
   /** Empieza a reproducir `item`, con `list` como cola. */
   play: (item: LibraryItem, list?: LibraryItem[]) => void;
@@ -39,6 +58,7 @@ interface PlayerState {
   toggleShuffle: () => void;
   setExpanded: (v: boolean) => void;
   toggleAudioOnly: () => void;
+  setFit: (f: FitMode) => void;
 
   /** Las escribe el elemento de audio o vídeo mientras suena. */
   reportTime: (position: number, duration: number) => void;
@@ -77,6 +97,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   // Se recuerda entre sesiones: quien escucha vídeos como música lo quiere
   // siempre, no una vez.
   audioOnly: localStorage.getItem("recodio.audioOnly") === "1",
+  fit: (localStorage.getItem("recodio.fit") as FitMode) || "contain",
 
   play: (item, list) => {
     const base = list && list.length > 0 ? list : [item];
@@ -178,6 +199,11 @@ export const usePlayer = create<PlayerState>((set, get) => ({
       return { shuffle, queue: cola, index: 0 };
     }),
   setExpanded: (v) => set({ expanded: v }),
+
+  setFit: (fit) => {
+    localStorage.setItem("recodio.fit", fit);
+    set({ fit });
+  },
 
   toggleAudioOnly: () =>
     set((s) => {
