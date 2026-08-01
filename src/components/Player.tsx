@@ -66,6 +66,77 @@ export function Player() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.position]);
 
+  // Controles del sistema: el panel multimedia de Windows, las teclas de
+  // reproducción del teclado y la pantalla de bloqueo. Se alimenta del elemento
+  // de vídeo que ya existe, así que no hay un segundo reproductor que sincronizar.
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms || !p.current) return;
+
+    ms.metadata = new MediaMetadata({
+      title: p.current.title,
+      artist: p.current.uploader ?? "",
+      album: p.queue.length > 1 ? `${p.index + 1} de ${p.queue.length}` : "",
+      artwork: p.current.thumbnail
+        ? [{ src: p.current.thumbnail, sizes: "512x512" }]
+        : [],
+    });
+    ms.playbackState = p.playing ? "playing" : "paused";
+
+    const acciones: [MediaSessionAction, MediaSessionActionHandler][] = [
+      ["play", () => usePlayer.setState({ playing: true })],
+      ["pause", () => usePlayer.setState({ playing: false })],
+      ["nexttrack", () => usePlayer.getState().next()],
+      ["previoustrack", () => usePlayer.getState().previous()],
+      ["stop", () => usePlayer.getState().stop()],
+      [
+        "seekbackward",
+        (d) => usePlayer.getState().seek(p.position - (d.seekOffset ?? 10)),
+      ],
+      [
+        "seekforward",
+        (d) => usePlayer.getState().seek(p.position + (d.seekOffset ?? 10)),
+      ],
+      [
+        "seekto",
+        (d) => d.seekTime != null && usePlayer.getState().seek(d.seekTime),
+      ],
+    ];
+    for (const [accion, manejador] of acciones) {
+      // Los sistemas no soportan todas las acciones; las que no, lanzan.
+      try {
+        ms.setActionHandler(accion, manejador);
+      } catch {
+        /* esa acción no está disponible aquí */
+      }
+    }
+
+    return () => {
+      for (const [accion] of acciones) {
+        try {
+          ms.setActionHandler(accion, null);
+        } catch {
+          /* nada que limpiar */
+        }
+      }
+    };
+  }, [p.current, p.playing, p.index, p.queue.length, p.position]);
+
+  // La posición en la barra del sistema, para que el panel muestre el avance.
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms?.setPositionState || !p.current || !p.duration) return;
+    try {
+      ms.setPositionState({
+        duration: p.duration,
+        position: Math.min(p.position, p.duration),
+        playbackRate: p.rate,
+      });
+    } catch {
+      /* algunas versiones no lo admiten */
+    }
+  }, [p.position, p.duration, p.rate, p.current]);
+
   useEffect(() => {
     if (!p.current) return;
     const manejar = (e: KeyboardEvent) => {
