@@ -7,8 +7,10 @@ mod local;
 mod m3u;
 mod proc;
 mod queue;
+mod refresh;
 mod repair;
 mod settings;
+mod thumbs;
 mod ytdlp;
 
 use crate::core::Core;
@@ -311,6 +313,29 @@ async fn library_import_folder(
     tauri::async_runtime::spawn_blocking(move || {
         local::import_folder(&core.db, &core.bins, Path::new(&path), |hechos, total| {
             let _ = app.emit("import-progress", (hechos, total));
+        })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+/// Pone la biblioteca al día de una vez: busca lo nuevo en las carpetas
+/// añadidas, retira lo que ya no está, corrige lo que no corresponde a su
+/// archivo y genera las miniaturas que falten.
+#[tauri::command]
+async fn library_refresh(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<refresh::RefreshReport> {
+    use tauri::Emitter;
+    let core = state.core.clone();
+    let data_dir = app.path().app_data_dir().map_err(err)?;
+    let emisor = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        refresh::refresh(&core.db, &core.bins, &data_dir, |fase, hechos, total| {
+            let _ = emisor.emit("refresh-progress", (fase, hechos, total));
         })
     })
     .await
@@ -664,6 +689,7 @@ pub fn run() {
             library_delete_playlist,
             library_repair,
             library_health,
+            library_refresh,
             library_import_folder,
             export_m3u,
             play_file,

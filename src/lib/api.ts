@@ -8,6 +8,7 @@ import type {
   ImportReport,
   Platform,
   PlayerOption,
+  RefreshReport,
   RepairReport,
   Playlist,
   PlaylistInfo,
@@ -68,6 +69,7 @@ export const api = {
     invoke<number>("library_delete_playlist", { playlistId, deleteFiles }),
   libraryRepair: () => invoke<RepairReport>("library_repair"),
   libraryHealth: () => invoke<RepairReport>("library_health"),
+  libraryRefresh: () => invoke<RefreshReport>("library_refresh"),
   libraryImportFolder: (path: string) =>
     invoke<ImportReport>("library_import_folder", { path }),
   exportM3u: (playlistId: string) =>

@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Music, Video } from "lucide-react";
 import { useState } from "react";
 
@@ -12,15 +13,18 @@ interface Props {
 
 export function Thumb({ src, alt = "", kind = "video", className = "", badge }: Props) {
   const [failed, setFailed] = useState(false);
+  // Las descargas guardan una URL; las miniaturas generadas de archivos locales
+  // son rutas de disco, que el webview solo carga a través de su protocolo.
+  const url = src && !/^(https?|data|asset|blob):/i.test(src) ? convertFileSrc(src) : src;
   const Icon = kind === "audio" ? Music : Video;
 
   return (
     <div
       className={`relative shrink-0 overflow-hidden rounded-lg bg-surface2 ${className}`}
     >
-      {src && !failed ? (
+      {url && !failed ? (
         <img
-          src={src}
+          src={url}
           alt={alt}
           loading="lazy"
           onError={() => setFailed(true)}

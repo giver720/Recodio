@@ -23,7 +23,12 @@ import { api } from "../lib/api";
 import { bytes, duration, relativeDate } from "../lib/format";
 import { usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
-import type { LibraryItem, Playlist, RepairReport } from "../lib/types";
+import type {
+  LibraryItem,
+  Playlist,
+  RefreshPhase,
+  RepairReport,
+} from "../lib/types";
 
 type Bucket = { id: string; label: string; icon: ReactNode; count?: number };
 
@@ -42,11 +47,20 @@ export function Library() {
   const [fixing, setFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState<{ done: number; total: number } | null>(null);
   const [importing, setImporting] = useState<{ done: number; total: number } | null>(null);
+  const [refreshing, setRefreshing] = useState<{
+    phase: RefreshPhase;
+    done: number;
+    total: number;
+  } | null>(null);
 
   useEffect(() => {
     const un = listen<[number, number]>("import-progress", (e) => {
       const [done, total] = e.payload;
       setImporting({ done, total });
+    });
+    const ref = listen<[RefreshPhase, number, number]>("refresh-progress", (e) => {
+      const [phase, done, total] = e.payload;
+      setRefreshing({ phase, done, total });
     });
     const rep = listen<[number, number]>("repair-progress", (e) => {
       const [done, total] = e.payload;
@@ -55,6 +69,7 @@ export function Library() {
     return () => {
       un.then((f) => f());
       rep.then((f) => f());
+      ref.then((f) => f());
     };
   }, []);
 
@@ -289,16 +304,56 @@ export function Library() {
             <FolderPlus size={15} />
           </IconButton>
           <IconButton
-            title="Revisar archivos que ya no existen"
+            title="Actualizar la biblioteca: buscar lo nuevo, corregir lo que no cuadre y generar las miniaturas que falten"
+            disabled={refreshing !== null || importing !== null}
             onClick={async () => {
-              const n = await api.libraryPrune();
-              toast("success", n > 0 ? `${n} entradas obsoletas eliminadas` : "Todo en orden");
-              refresh();
+              setRefreshing({ phase: "scanning", done: 0, total: 0 });
+              try {
+                const r = await api.libraryRefresh();
+                const partes = [
+                  r.imported > 0 && `${r.imported} archivos nuevos`,
+                  r.thumbnails > 0 && `${r.thumbnails} miniaturas`,
+                  r.mismatched > 0 && `${r.mismatched} entradas corregidas`,
+                  r.missing > 0 && `${r.missing} ya no existían`,
+                ].filter(Boolean);
+                toast(
+                  "success",
+                  partes.length > 0
+                    ? `Biblioteca al día: ${partes.join(" · ")}`
+                    : "La biblioteca ya estaba al día",
+                );
+                useStore.setState((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+              } catch (e) {
+                toast("error", String(e));
+              } finally {
+                setRefreshing(null);
+              }
             }}
           >
-            <RefreshCw size={15} />
+            <RefreshCw size={15} className={refreshing ? "animate-spin" : ""} />
           </IconButton>
         </div>
+
+        {refreshing && (
+          <div className="mx-6 mt-4 flex items-center gap-3 rounded-2xl border border-accent2/30 bg-accent2/5 px-3.5 py-2.5">
+            <RefreshCw size={16} className="shrink-0 animate-spin text-accent2" />
+            <span className="min-w-0 flex-1 text-[12px] leading-snug">
+              {
+                {
+                  scanning: "Buscando archivos nuevos en tus carpetas…",
+                  checking: "Comprobando que cada canción sea la suya…",
+                  thumbnails: "Generando miniaturas…",
+                }[refreshing.phase]
+              }
+              {refreshing.total > 0 && ` ${refreshing.done} de ${refreshing.total}`}
+            </span>
+            {refreshing.total > 0 && (
+              <span className="shrink-0 text-[12px] tabular-nums text-muted">
+                {Math.round((refreshing.done / refreshing.total) * 100)}%
+              </span>
+            )}
+          </div>
+        )}
 
         {importing && (
           <div className="mx-6 mt-4 flex items-center gap-3 rounded-2xl border border-accent2/30 bg-accent2/5 px-3.5 py-2.5">

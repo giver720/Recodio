@@ -10,6 +10,18 @@ export interface RepairReport {
   mismatched: number;
 }
 
+/** Resultado de poner la biblioteca al día. */
+export interface RefreshReport {
+  imported: number;
+  missing: number;
+  mismatched: number;
+  thumbnails: number;
+  thumbnailsCleaned: number;
+  folders: number;
+}
+
+export type RefreshPhase = "scanning" | "checking" | "thumbnails";
+
 /** Resultado de escanear una carpeta del equipo. */
 export interface ImportReport {
   found: number;
