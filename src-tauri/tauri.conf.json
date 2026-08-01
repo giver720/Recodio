@@ -24,6 +24,15 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "**"
+          ],
+          "requireLiteralLeadingDot": false
+        }
+      },
       "csp": null
     }
   },
@@ -45,10 +54,14 @@
     "linux": {
       "deb": {
         "section": "video",
-        "recommends": ["yt-dlp", "ffmpeg", "xdg-utils"]
+        "recommends": [
+          "yt-dlp",
+          "ffmpeg",
+          "xdg-utils"
+        ]
       },
       "appimage": {
-        "bundleMediaFramework": false
+        "bundleMediaFramework": true
       }
     },
     "icon": [

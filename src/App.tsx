@@ -5,6 +5,7 @@ import { ProgressBar } from "./components/ProgressBar";
 import { Toasts } from "./components/Toasts";
 import { useStore } from "./lib/store";
 import { Downloader } from "./views/Downloader";
+import { Player } from "./components/Player";
 import { Library } from "./views/Library";
 import { QueueView } from "./views/QueueView";
 import { SettingsView } from "./views/SettingsView";
@@ -104,14 +105,17 @@ export default function App() {
       </nav>
 
       {/* ---- Contenido ---- */}
-      <main className="relative z-10 min-w-0 flex-1 overflow-y-auto">
-        <div key={tab} className="rc-fade-in h-full">
-          {tab === "download" && <Downloader onQueued={() => setTab("queue")} />}
-          {tab === "queue" && <QueueView />}
-          {tab === "library" && <Library />}
-          {tab === "settings" && <SettingsView />}
-        </div>
-      </main>
+      <div className="relative z-10 flex min-w-0 flex-1 flex-col">
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          <div key={tab} className="rc-fade-in h-full">
+            {tab === "download" && <Downloader onQueued={() => setTab("queue")} />}
+            {tab === "queue" && <QueueView />}
+            {tab === "library" && <Library />}
+            {tab === "settings" && <SettingsView />}
+          </div>
+        </main>
+        <Player />
+      </div>
 
       <Toasts />
     </div>

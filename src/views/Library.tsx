@@ -18,6 +18,7 @@ import { useMenu } from "../components/Menu";
 import { EmptyState, IconButton, inputClass } from "../components/ui";
 import { api } from "../lib/api";
 import { bytes, duration, relativeDate } from "../lib/format";
+import { usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
 import type { LibraryItem, Playlist, RepairReport } from "../lib/types";
 
@@ -27,6 +28,7 @@ export function Library() {
   const libraryVersion = useStore((s) => s.libraryVersion);
   const toast = useStore((s) => s.toast);
   const { openMenu, menu } = useMenu();
+  const play = usePlayer((s) => s.play);
 
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -235,14 +237,19 @@ export function Library() {
               {shown.map((item) => (
                 <div
                   key={item.id}
-                  onDoubleClick={() =>
-                    api.playFile(item.filePath).catch((e) => toast("error", String(e)))
-                  }
+                  onDoubleClick={() => play(item, shown)}
                   onContextMenu={(e) =>
                     openMenu(e, [
                       {
-                        label: "Reproducir",
+                        label: "Reproducir aquí",
                         icon: <Play size={14} />,
+                        onClick: () => play(item, shown),
+                      },
+                      {
+                        // El reproductor interno no cubre todos los formatos, y
+                        // hay quien prefiere el suyo: sigue a un clic derecho.
+                        label: "Abrir en el reproductor externo",
+                        icon: <ExternalLink size={14} />,
                         onClick: () =>
                           api.playFile(item.filePath).catch((err) => toast("error", String(err))),
                       },
@@ -300,12 +307,7 @@ export function Library() {
                     className="flex shrink-0 gap-1 opacity-0 transition group-hover:opacity-100"
                     onDoubleClick={(e) => e.stopPropagation()}
                   >
-                    <IconButton
-                      title="Reproducir"
-                      onClick={() =>
-                        api.playFile(item.filePath).catch((e) => toast("error", String(e)))
-                      }
-                    >
+                    <IconButton title="Reproducir" onClick={() => play(item, shown)}>
                       <Play size={15} />
                     </IconButton>
                     <IconButton
