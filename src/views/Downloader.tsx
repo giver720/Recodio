@@ -20,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { BlockPicker } from "../components/BlockPicker";
 import { MissingTools } from "../components/MissingTools";
 import { Thumb } from "../components/Thumb";
 import { useMenu } from "../components/Menu";
@@ -52,6 +53,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [overwrite, setOverwrite] = useState<Set<string>>(new Set());
   const [destDir, setDestDir] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [blockSize, setBlockSize] = useState(50);
 
   const existingOf = (e: Entry, k: Kind) =>
     k === "audio" ? e.existingAudio : e.existingVideo;
@@ -352,6 +354,17 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
           </div>
 
           {/* ---- Lista ---- */}
+          {result.entries.length > 1 && (
+            <BlockPicker
+              entries={result.entries}
+              size={blockSize}
+              onSizeChange={setBlockSize}
+              selected={selected}
+              isDone={(e) => Boolean(existingOf(e, kind))}
+              onToggleBlock={setAll}
+            />
+          )}
+
           {result.entries.length > 1 && (
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={() => setAll(visible.map((e) => e.id), true)}>
