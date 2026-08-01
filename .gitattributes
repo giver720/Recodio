@@ -1,0 +1,5 @@
+* text=auto
+
+# Los scripts de shell deben conservar finales de línea Unix aunque se editen en
+# Windows: con CRLF, bash falla con un críptico «$'\r': command not found».
+*.sh text eol=lf

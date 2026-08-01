@@ -138,8 +138,14 @@ Debian ni en Ubuntu, y por eso va aparte con `pipx`.
 Dependencias de compilación (Ubuntu / Debian):
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev build-essential patchelf
 ```
+
+> `patchelf` es imprescindible para empaquetar el AppImage: el reproductor
+> necesita GStreamer dentro del paquete y el plugin que lo mete usa patchelf para
+> reescribir las rutas de las bibliotecas. Sin él, el empaquetado falla con un
+> escueto «failed to run linuxdeploy» que no dice nada. `tools/build-linux.sh` lo
+> instala en el directorio personal si falta.
 
 Las herramientas de descarga van como **`Recommends`** del paquete, no como
 `Depends`: Recodio arranca sin ellas y sabe instalarse su propio yt-dlp desde
