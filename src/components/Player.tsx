@@ -3,6 +3,7 @@ import {
   ListMusic,
   Maximize2,
   Music,
+  MonitorPlay,
   Pause,
   Play,
   Repeat,
@@ -259,6 +260,21 @@ export function Player() {
     </div>
   );
 
+  // Solo tiene sentido en vídeos: una canción ya es solo audio.
+  const modoAudio = esVideo ? (
+    <Boton
+      title={
+        p.audioOnly
+          ? "Volver a ver el vídeo"
+          : "Escucharlo como música, sin vídeo"
+      }
+      activo={p.audioOnly}
+      onClick={p.toggleAudioOnly}
+    >
+      {p.audioOnly ? <MonitorPlay size={15} /> : <Music size={15} />}
+    </Boton>
+  ) : null;
+
   const volumen = (
     <div className="flex items-center gap-1.5">
       <Boton title={p.muted ? "Quitar silencio" : "Silenciar"} onClick={p.toggleMute}>
@@ -319,7 +335,8 @@ export function Player() {
           <div className="flex items-center">
             <div className="flex-1">{volumen}</div>
             {controles}
-            <div className="flex flex-1 justify-end">
+            <div className="flex flex-1 items-center justify-end gap-1">
+              {modoAudio}
               <Velocidad rate={p.rate} onChange={p.setRate} />
             </div>
           </div>
@@ -360,7 +377,8 @@ export function Player() {
       <div className="flex flex-1 items-center justify-end gap-2">
         <Velocidad rate={p.rate} onChange={p.setRate} />
         {volumen}
-        {esVideo && (
+        {modoAudio}
+        {esVideo && !p.audioOnly && (
           <Boton title="Ampliar" onClick={() => p.setExpanded(true)}>
             <Maximize2 size={15} />
           </Boton>

@@ -22,6 +22,8 @@ interface PlayerState {
   shuffle: boolean;
   /** El vídeo ocupa toda la ventana en vez de la barra inferior. */
   expanded: boolean;
+  /** Escuchar un vídeo sin verlo, como si fuera una canción. */
+  audioOnly: boolean;
 
   /** Empieza a reproducir `item`, con `list` como cola. */
   play: (item: LibraryItem, list?: LibraryItem[]) => void;
@@ -36,6 +38,7 @@ interface PlayerState {
   cycleRepeat: () => void;
   toggleShuffle: () => void;
   setExpanded: (v: boolean) => void;
+  toggleAudioOnly: () => void;
 
   /** Las escribe el elemento de audio o vídeo mientras suena. */
   reportTime: (position: number, duration: number) => void;
@@ -71,6 +74,9 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   repeat: "off",
   shuffle: false,
   expanded: false,
+  // Se recuerda entre sesiones: quien escucha vídeos como música lo quiere
+  // siempre, no una vez.
+  audioOnly: localStorage.getItem("recodio.audioOnly") === "1",
 
   play: (item, list) => {
     const base = list && list.length > 0 ? list : [item];
@@ -83,8 +89,9 @@ export const usePlayer = create<PlayerState>((set, get) => ({
       playing: true,
       position: 0,
       duration: 0,
-      // Un vídeo pide pantalla; una canción se queda en la barra de abajo.
-      expanded: isVideo(item),
+      // Un vídeo pide pantalla; una canción se queda en la barra de abajo. Y en
+      // modo solo audio, tampoco un vídeo la pide.
+      expanded: isVideo(item) && !get().audioOnly,
     });
   },
 
@@ -171,6 +178,18 @@ export const usePlayer = create<PlayerState>((set, get) => ({
       return { shuffle, queue: cola, index: 0 };
     }),
   setExpanded: (v) => set({ expanded: v }),
+
+  toggleAudioOnly: () =>
+    set((s) => {
+      const audioOnly = !s.audioOnly;
+      localStorage.setItem("recodio.audioOnly", audioOnly ? "1" : "0");
+      // Al pasar a solo audio se repliega; al volver a vídeo se abre, que es
+      // justo lo que se acaba de pedir en cada caso.
+      return {
+        audioOnly,
+        expanded: audioOnly ? false : Boolean(s.current && isVideo(s.current)),
+      };
+    }),
 
   reportTime: (position, duration) => set({ position, duration }),
 }));
