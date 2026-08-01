@@ -70,9 +70,18 @@ fn apply_extras_args(cmd: &mut tokio::process::Command, s: &Settings, kind: &str
         cmd.arg("--write-subs")
             .arg("--write-auto-subs")
             .arg("--sub-langs")
-            .arg(&s.subtitle_langs);
+            .arg(&s.subtitle_langs)
+            // WebVTT es el único formato que el reproductor sabe cargar.
+            .arg("--sub-format")
+            .arg("vtt/best")
+            .arg("--convert-subs")
+            .arg("vtt");
         if s.embed_subtitles {
-            cmd.arg("--embed-subs");
+            // Sin `--keep-subs`, yt-dlp borra los archivos sueltos después de
+            // incrustarlos, y los incrustados en un MP4 el reproductor no puede
+            // leerlos. Se quedan los dos: uno para otros programas, otro para
+            // poder elegir idioma aquí.
+            cmd.arg("--embed-subs").arg("--keep-subs");
         }
     }
 

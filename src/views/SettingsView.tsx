@@ -252,7 +252,7 @@ export function SettingsView() {
           checked={s.writeSubtitles}
           onChange={(v) => save({ writeSubtitles: v })}
           label="Descargar subtítulos"
-          hint="Incluye los automáticos cuando no hay manuales."
+          hint="Incluye los automáticos cuando no hay manuales. Hacen falta para poder elegir idioma en el reproductor."
         />
         {s.writeSubtitles && (
           <div className="grid grid-cols-2 gap-3 pl-1">
@@ -267,7 +267,8 @@ export function SettingsView() {
               <Toggle
                 checked={s.embedSubtitles}
                 onChange={(v) => save({ embedSubtitles: v })}
-                label="Incrustarlos en el vídeo"
+                label="Incrustarlos también en el vídeo"
+                hint="Para otros reproductores. Los sueltos se conservan igualmente."
               />
             </div>
           </div>

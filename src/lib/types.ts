@@ -31,6 +31,13 @@ export interface ImportReport {
   title: string;
 }
 
+/** Pista de subtítulos que acompaña a un vídeo. */
+export interface SubtitleTrack {
+  lang: string;
+  label: string;
+  path: string;
+}
+
 /** Reproductor encontrado en el equipo. */
 export interface PlayerOption {
   name: string;

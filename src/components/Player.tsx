@@ -1,10 +1,13 @@
 import {
   ChevronDown,
   ListMusic,
+  Maximize,
   Maximize2,
+  Minimize,
   Music,
   MonitorPlay,
   Ratio,
+  Subtitles,
   Pause,
   Play,
   Repeat,
@@ -26,7 +29,9 @@ import {
   usePlayer,
   type FitMode,
 } from "../lib/player";
+import { api } from "../lib/api";
 import { useStore } from "../lib/store";
+import type { SubtitleTrack } from "../lib/types";
 
 /** mm:ss, o h:mm:ss si pasa de la hora. */
 function clock(total: number): string {
@@ -43,6 +48,61 @@ export function Player() {
   const toast = useStore((s) => s.toast);
   const ref = useRef<HTMLVideoElement>(null);
   const [arrastrando, setArrastrando] = useState<number | null>(null);
+  const [pantallaCompleta, setPantallaCompleta] = useState(false);
+  const contenedor = useRef<HTMLDivElement>(null);
+  const [subtitulos, setSubtitulos] = useState<SubtitleTrack[]>([]);
+  const [subActivo, setSubActivo] = useState<string | null>(null);
+  const [menuSubs, setMenuSubs] = useState(false);
+
+  // El navegador puede salir de pantalla completa por su cuenta (Esc del
+  // sistema, cambio de ventana), así que el estado se lee de él, no se supone.
+  useEffect(() => {
+    const alCambiar = () => setPantallaCompleta(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", alCambiar);
+    return () => document.removeEventListener("fullscreenchange", alCambiar);
+  }, []);
+
+  async function alternarPantallaCompleta() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        // Se amplía primero: en la barra de abajo no hay nada que llenar.
+        if (!usePlayer.getState().expanded) usePlayer.getState().setExpanded(true);
+        await contenedor.current?.requestFullscreen();
+      }
+    } catch {
+      /* el sistema puede negarlo; no hay nada que hacer */
+    }
+  }
+
+  useEffect(() => {
+    setSubActivo(null);
+    setMenuSubs(false);
+    if (!p.current || !isVideo(p.current)) {
+      setSubtitulos([]);
+      return;
+    }
+    let vigente = true;
+    api
+      .subtitlesFor(p.current.filePath)
+      .then((s) => vigente && setSubtitulos(s))
+      .catch(() => vigente && setSubtitulos([]));
+    return () => {
+      vigente = false;
+    };
+  }, [p.current]);
+
+  // El elemento de vídeo expone las pistas cargadas; se activa la elegida y se
+  // apagan las demás, porque el navegador puede encender una por su cuenta.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    for (let i = 0; i < el.textTracks.length; i++) {
+      const pista = el.textTracks[i];
+      pista.mode = pista.language === subActivo ? "showing" : "disabled";
+    }
+  }, [subActivo, subtitulos]);
 
   // Play/pausa. El navegador puede rechazar la reproducción, así que el estado
   // se corrige si eso ocurre en vez de quedarse mintiendo.
@@ -165,7 +225,11 @@ export function Player() {
         p.seek(p.position + 5);
       } else if (e.code === "ArrowLeft") {
         p.seek(p.position - 5);
-      } else if (e.code === "Escape" && p.expanded) {
+      } else if (e.code === "KeyF" && p.current && isVideo(p.current)) {
+        e.preventDefault();
+        alternarPantallaCompleta();
+      } else if (e.code === "Escape" && p.expanded && !document.fullscreenElement) {
+        // Con pantalla completa activa, Esc lo gestiona el propio sistema.
         p.setExpanded(false);
       }
     };
@@ -212,7 +276,18 @@ export function Player() {
         usePlayer.setState({ playing: false });
       }}
       playsInline
-    />
+      crossOrigin="anonymous"
+    >
+      {subtitulos.map((s) => (
+        <track
+          key={s.path}
+          kind="subtitles"
+          src={mediaSrc(s.path)}
+          srcLang={s.lang}
+          label={s.label}
+        />
+      ))}
+    </video>
   );
 
   const barraProgreso = (
@@ -294,6 +369,45 @@ export function Player() {
     </Boton>
   ) : null;
 
+  const selectorSubs = esVideo && subtitulos.length > 0 ? (
+    <div className="relative">
+      <Boton
+        title="Subtítulos"
+        activo={subActivo !== null}
+        onClick={() => setMenuSubs((v) => !v)}
+      >
+        <Subtitles size={15} />
+      </Boton>
+      {menuSubs && (
+        <div className="absolute bottom-full right-0 mb-1 min-w-40 overflow-hidden rounded-xl border border-line bg-surface2 py-1 shadow-xl">
+          <BotonSub activo={subActivo === null} onClick={() => { setSubActivo(null); setMenuSubs(false); }}>
+            Sin subtítulos
+          </BotonSub>
+          {subtitulos.map((s) => (
+            <BotonSub
+              key={s.path}
+              activo={subActivo === s.lang}
+              onClick={() => { setSubActivo(s.lang); setMenuSubs(false); }}
+            >
+              {s.label}
+            </BotonSub>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const botonPantalla = esVideo ? (
+    <Boton
+      title={
+        pantallaCompleta ? "Salir de pantalla completa (F)" : "Pantalla completa (F)"
+      }
+      onClick={alternarPantallaCompleta}
+    >
+      {pantallaCompleta ? <Minimize size={15} /> : <Maximize size={15} />}
+    </Boton>
+  ) : null;
+
   const ajuste = esVideo && p.expanded ? (
     <button
       type="button"
@@ -336,7 +450,10 @@ export function Player() {
   // ---- Vista ampliada, para vídeo ----
   if (p.expanded && esVideo) {
     return (
-      <div className="fixed inset-0 z-40 flex flex-col bg-black/95 backdrop-blur">
+      <div
+        ref={contenedor}
+        className="fixed inset-0 z-40 flex flex-col bg-black/95 backdrop-blur"
+      >
         <div className="flex items-center gap-3 px-5 py-3 text-white">
           <button
             type="button"
@@ -371,6 +488,8 @@ export function Player() {
             {controles}
             <div className="flex flex-1 items-center justify-end gap-1">
               {ajuste}
+              {selectorSubs}
+              {botonPantalla}
               {modoAudio}
               <Velocidad rate={p.rate} onChange={p.setRate} />
             </div>
@@ -412,6 +531,7 @@ export function Player() {
       <div className="flex flex-1 items-center justify-end gap-2">
         <Velocidad rate={p.rate} onChange={p.setRate} />
         {volumen}
+        {selectorSubs}
         {modoAudio}
         {esVideo && !p.audioOnly && (
           <Boton title="Ampliar" onClick={() => p.setExpanded(true)}>
@@ -444,6 +564,28 @@ function Boton({
       onClick={onClick}
       className={`rounded-lg p-1.5 transition hover:bg-surface3 ${
         activo ? "text-accent" : "text-muted hover:text-fg"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function BotonSub({
+  children,
+  activo,
+  onClick,
+}: {
+  children: React.ReactNode;
+  activo: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`block w-full px-3 py-1.5 text-left text-[12px] transition hover:bg-surface3 ${
+        activo ? "text-accent" : "text-fg"
       }`}
     >
       {children}

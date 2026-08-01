@@ -10,6 +10,7 @@ mod queue;
 mod refresh;
 mod repair;
 mod settings;
+mod subs;
 mod thumbs;
 mod ytdlp;
 
@@ -318,6 +319,20 @@ async fn library_import_folder(
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+/// Subtítulos que acompañan a un vídeo, listos para cargar en el reproductor.
+#[tauri::command]
+async fn subtitles_for(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<subs::SubtitleTrack>> {
+    let core = state.core.clone();
+    let cache = subs::cache_dir_de(&app.path().app_data_dir().map_err(err)?);
+    tauri::async_runtime::spawn_blocking(move || subs::find_for(&path, &core.bins, &cache))
+        .await
+        .map_err(err)
 }
 
 /// Pone la biblioteca al día de una vez: busca lo nuevo en las carpetas
@@ -690,6 +705,7 @@ pub fn run() {
             library_repair,
             library_health,
             library_refresh,
+            subtitles_for,
             library_import_folder,
             export_m3u,
             play_file,

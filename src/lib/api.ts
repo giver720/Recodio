@@ -15,6 +15,7 @@ import type {
   QueueStats,
   Settings,
   Source,
+  SubtitleTrack,
   ToolStatus,
 } from "./types";
 
@@ -80,6 +81,7 @@ export const api = {
   openFolder: (path: string) => invoke<void>("open_folder", { path }),
   appPlatform: () => invoke<Platform>("app_platform"),
   detectPlayers: () => invoke<PlayerOption[]>("detect_players"),
+  subtitlesFor: (path: string) => invoke<SubtitleTrack[]>("subtitles_for", { path }),
 
   /** `force` vuelve a lanzar las herramientas; sin él se usa lo ya averiguado. */
   toolsStatus: (force = false) => invoke<ToolStatus[]>("tools_status", { force }),
