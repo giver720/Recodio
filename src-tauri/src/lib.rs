@@ -3,6 +3,7 @@ mod binaries;
 mod core;
 mod db;
 mod job;
+mod local;
 mod m3u;
 mod proc;
 mod queue;
@@ -278,6 +279,27 @@ fn library_delete(id: String, delete_file: bool, state: State<'_, AppState>) -> 
 #[tauri::command]
 fn library_prune(state: State<'_, AppState>) -> CmdResult<usize> {
     state.core.db.prune_missing().map_err(err)
+}
+
+/// Añade una carpeta del equipo a la biblioteca. Volver a escanearla solo
+/// incorpora lo que falte: emite `import-progress` con (hechos, total) porque
+/// leer los datos de cientos de archivos lleva su tiempo la primera vez.
+#[tauri::command]
+async fn library_import_folder(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<local::ImportReport> {
+    use tauri::Emitter;
+    let core = state.core.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        local::import_folder(&core.db, &core.bins, Path::new(&path), |hechos, total| {
+            let _ = app.emit("import-progress", (hechos, total));
+        })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
 }
 
 /// Revisa la biblioteca sin modificarla, para poder avisar de que hay entradas
@@ -615,6 +637,7 @@ pub fn run() {
             library_prune,
             library_repair,
             library_health,
+            library_import_folder,
             export_m3u,
             play_file,
             reveal_file,

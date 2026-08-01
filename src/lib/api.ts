@@ -5,6 +5,7 @@ import type {
   Job,
   Kind,
   LibraryItem,
+  ImportReport,
   Platform,
   PlayerOption,
   RepairReport,
@@ -65,6 +66,8 @@ export const api = {
   libraryPrune: () => invoke<number>("library_prune"),
   libraryRepair: () => invoke<RepairReport>("library_repair"),
   libraryHealth: () => invoke<RepairReport>("library_health"),
+  libraryImportFolder: (path: string) =>
+    invoke<ImportReport>("library_import_folder", { path }),
   exportM3u: (playlistId: string) =>
     invoke<string>("export_m3u", { playlistId }),
 

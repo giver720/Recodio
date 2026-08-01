@@ -8,6 +8,15 @@ export interface RepairReport {
   missing: number;
 }
 
+/** Resultado de escanear una carpeta del equipo. */
+export interface ImportReport {
+  found: number;
+  added: number;
+  skipped: number;
+  playlistId: string;
+  title: string;
+}
+
 /** Reproductor encontrado en el equipo. */
 export interface PlayerOption {
   name: string;
@@ -15,7 +24,8 @@ export interface PlayerOption {
 }
 
 export type Kind = "video" | "audio";
-export type Source = "ytdlp" | "spotdl";
+/** `local` son las carpetas del propio equipo importadas a la biblioteca. */
+export type Source = "ytdlp" | "spotdl" | "local";
 
 export interface Entry {
   id: string;

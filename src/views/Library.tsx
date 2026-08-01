@@ -4,6 +4,7 @@ import {
   ExternalLink,
   FileVideo,
   FolderOpen,
+  FolderPlus,
   Library as LibraryIcon,
   ListMusic,
   Music,
@@ -12,6 +13,8 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { Thumb } from "../components/Thumb";
 import { useMenu } from "../components/Menu";
@@ -37,6 +40,41 @@ export function Library() {
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<RepairReport | null>(null);
   const [fixing, setFixing] = useState(false);
+  const [importing, setImporting] = useState<{ done: number; total: number } | null>(null);
+
+  useEffect(() => {
+    const un = listen<[number, number]>("import-progress", (e) => {
+      const [done, total] = e.payload;
+      setImporting({ done, total });
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  async function importFolder() {
+    const picked = await openDialog({ directory: true });
+    if (typeof picked !== "string") return;
+    setImporting({ done: 0, total: 0 });
+    try {
+      const r = await api.libraryImportFolder(picked);
+      toast(
+        "success",
+        r.added > 0
+          ? `${r.title}: ${r.added} ${r.added === 1 ? "archivo añadido" : "archivos añadidos"}` +
+              (r.skipped > 0 ? `, ${r.skipped} ya estaban` : "")
+          : r.found === 0
+            ? `No se encontró música ni vídeo en ${r.title}`
+            : `${r.title} ya estaba al día: nada nuevo que añadir`,
+      );
+      useStore.setState((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+    } catch (e) {
+      toast("error", String(e));
+    } finally {
+      setImporting(null);
+    }
+  }
+
 
   const playlistId = playlists.find((p) => p.id === bucket)?.id ?? null;
 
@@ -124,6 +162,33 @@ export function Library() {
             count={p.itemCount}
             onContextMenu={(e) =>
               openMenu(e, [
+                ...(p.source === "local"
+                  ? [
+                      {
+                        label: "Buscar canciones nuevas",
+                        icon: <RefreshCw size={14} />,
+                        onClick: async () => {
+                          setImporting({ done: 0, total: 0 });
+                          try {
+                            const r = await api.libraryImportFolder(p.url);
+                            toast(
+                              "success",
+                              r.added > 0
+                                ? `${r.added} ${r.added === 1 ? "archivo nuevo" : "archivos nuevos"} en ${r.title}`
+                                : `${r.title} ya estaba al día`,
+                            );
+                            useStore.setState((s) => ({
+                              libraryVersion: s.libraryVersion + 1,
+                            }));
+                          } catch (err) {
+                            toast("error", String(err));
+                          } finally {
+                            setImporting(null);
+                          }
+                        },
+                      },
+                    ]
+                  : []),
                 {
                   label: "Regenerar el .m3u8",
                   icon: <RefreshCw size={14} />,
@@ -161,6 +226,13 @@ export function Library() {
             {shown.length} {shown.length === 1 ? "archivo" : "archivos"}
           </span>
           <IconButton
+            title="Añadir una carpeta de tu equipo a la biblioteca"
+            onClick={importFolder}
+            disabled={importing !== null}
+          >
+            <FolderPlus size={15} />
+          </IconButton>
+          <IconButton
             title="Revisar archivos que ya no existen"
             onClick={async () => {
               const n = await api.libraryPrune();
@@ -171,6 +243,22 @@ export function Library() {
             <RefreshCw size={15} />
           </IconButton>
         </div>
+
+        {importing && (
+          <div className="mx-6 mt-4 flex items-center gap-3 rounded-2xl border border-accent2/30 bg-accent2/5 px-3.5 py-2.5">
+            <FolderPlus size={16} className="shrink-0 animate-pulse text-accent2" />
+            <span className="min-w-0 flex-1 text-[12px] leading-snug">
+              {importing.total > 0
+                ? `Leyendo la carpeta: ${importing.done} de ${importing.total} archivos`
+                : "Buscando música y vídeo en la carpeta…"}
+            </span>
+            {importing.total > 0 && (
+              <span className="shrink-0 text-[12px] tabular-nums text-muted">
+                {Math.round((importing.done / importing.total) * 100)}%
+              </span>
+            )}
+          </div>
+        )}
 
         {health && health.removed > 0 && (
           <div className="mx-6 mt-4 flex items-start gap-3 rounded-2xl border border-warn/40 bg-warn/5 p-3.5">
