@@ -43,6 +43,10 @@ export interface PlaylistInfo {
 export interface AnalyzeResult {
   /** Marca de tiempo si la lista viene de un análisis anterior. */
   cachedAt?: number;
+  /** Faltan canciones por llegar; se están pidiendo en segundo plano. */
+  partial?: boolean;
+  /** Identifica el análisis para casar los envíos posteriores. */
+  key?: string;
   source: Source;
   isPlaylist: boolean;
   playlist: PlaylistInfo | null;

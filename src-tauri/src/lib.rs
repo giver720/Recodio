@@ -39,19 +39,70 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 async fn analyze_url(
     url: String,
     refresh: Option<bool>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<AnalyzeResult> {
     let core = state.core.clone();
     let settings = core.settings.read().unwrap().clone();
-    analyze::analyze(
-        url.trim(),
+    let url = url.trim().to_string();
+
+    let result = analyze::analyze(
+        &url,
         &core.bins,
         &core.db,
         &settings,
         refresh.unwrap_or(false),
     )
     .await
-    .map_err(err)
+    .map_err(err)?;
+
+    // Spotify solo entrega 100 canciones de una vez. En vez de hacer esperar por
+    // la lista completa —que puede tardar minutos— se devuelven esas cien y el
+    // resto se pide por detrás: así se puede empezar a marcar y descargar ya.
+    if result.partial {
+        let core = core.clone();
+        let key = result.key.clone();
+        let playlist = result.playlist.clone();
+        let fuente = result.source.clone();
+
+        tauri::async_runtime::spawn(async move {
+            use tauri::Emitter;
+            match analyze::complete_spotify(&url, &core.bins).await {
+                Ok(mut todas) => {
+                    let playlist_id = playlist
+                        .as_ref()
+                        .and_then(|pl| core.db.playlist_id_for(&fuente, &pl.source_id));
+                    analyze::marcar_duplicados(&mut todas, &core.db, playlist_id.as_deref());
+
+                    // Se guarda la lista entera, ya sí, para la próxima vez.
+                    let completo = AnalyzeResult {
+                        source: fuente,
+                        is_playlist: true,
+                        playlist,
+                        entries: todas.clone(),
+                        cached_at: None,
+                        partial: false,
+                        key: key.clone(),
+                    };
+                    if let Ok(payload) = serde_json::to_string(&completo) {
+                        let _ = core.db.cache_put(&key, &payload);
+                    }
+
+                    // Se envían todas, no solo las que faltan. Saltarse las
+                    // primeras daría por hecho que el camino lento devuelve el
+                    // mismo orden que el rápido, y si spotDL entrega otro orden
+                    // se perderían canciones. La interfaz descarta las repetidas
+                    // por su identificador, que sí es fiable.
+                    let _ = app.emit("analyze-more", (key, todas, true));
+                }
+                Err(e) => {
+                    let _ = app.emit("analyze-failed", (key, e.to_string()));
+                }
+            }
+        });
+    }
+
+    Ok(result)
 }
 
 // ------------------------------------------------------------------- cola

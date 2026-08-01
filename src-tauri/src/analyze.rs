@@ -51,6 +51,13 @@ pub struct AnalyzeResult {
     /// usa para ofrecer actualizarlo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_at: Option<i64>,
+    /// Quedan canciones por llegar: Spotify solo entrega 100 de una vez y el
+    /// resto se está pidiendo por detrás.
+    #[serde(default)]
+    pub partial: bool,
+    /// Identifica este análisis para casar los envíos posteriores con él.
+    #[serde(default)]
+    pub key: String,
 }
 
 pub fn is_spotify(url: &str) -> bool {
@@ -97,11 +104,14 @@ pub async fn analyze(
         None => analyze_fresh(url, bins, settings).await?,
     };
 
-    if result.cached_at.is_none() {
+    // Una lista incompleta no se guarda: si se guardara, la siguiente vez se
+    // serviría recortada creyendo que está entera.
+    if result.cached_at.is_none() && !result.partial {
         if let Ok(payload) = serde_json::to_string(&result) {
             let _ = db.cache_put(&key, &payload);
         }
     }
+    result.key = key.clone();
 
     // Los duplicados nunca se guardan: dependen de lo que haya en la biblioteca
     // *ahora*, no de cuando se analizó el enlace.
@@ -114,15 +124,20 @@ pub async fn analyze(
         .as_ref()
         .and_then(|pl| db.playlist_id_for(&result.source, &pl.source_id));
 
-    for entry in &mut result.entries {
+    marcar_duplicados(&mut result.entries, db, playlist_id.as_deref());
+    Ok(result)
+}
+
+/// Marca qué entradas ya están descargadas en ese destino.
+pub fn marcar_duplicados(entries: &mut [Entry], db: &Db, playlist_id: Option<&str>) {
+    for entry in entries.iter_mut() {
         entry.existing_video = db
-            .find_existing(&entry.extractor, &entry.source_id, "video", playlist_id.as_deref())
+            .find_existing(&entry.extractor, &entry.source_id, "video", playlist_id)
             .map(|i| i.file_path);
         entry.existing_audio = db
-            .find_existing(&entry.extractor, &entry.source_id, "audio", playlist_id.as_deref())
+            .find_existing(&entry.extractor, &entry.source_id, "audio", playlist_id)
             .map(|i| i.file_path);
     }
-    Ok(result)
 }
 
 async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Result<AnalyzeResult> {
@@ -153,6 +168,8 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
             playlist: None,
             entries: vec![entry],
             cached_at: None,
+            partial: false,
+            key: String::new(),
         });
     }
 
@@ -199,6 +216,8 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
         playlist: Some(playlist),
         entries,
         cached_at: None,
+        partial: false,
+        key: String::new(),
     })
 }
 
@@ -418,44 +437,17 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
                 unavailable: false,
             }],
             cached_at: None,
+            partial: false,
+            key: String::new(),
         });
     }
 
     let tracks = tracks.unwrap();
 
-    // Lista al tope: seguramente hay más y el embed las ha recortado. El propio
-    // embed trae un token con el que se puede pedir la lista completa por
-    // páginas; si eso falla, el llamante recurre a spotDL.
-    if kind == "playlist" && tracks.len() >= EMBED_MAX {
-        if let Some(token) = json
-            .pointer("/props/pageProps/state/settings/session/accessToken")
-            .and_then(Value::as_str)
-        {
-            match playlist_completa(&cliente, id, token).await {
-                Ok(completas) if completas.len() > tracks.len() => {
-                    return Ok(AnalyzeResult {
-                        source: "spotdl".into(),
-                        is_playlist: true,
-                        playlist: Some(PlaylistInfo {
-                            source_id: id.to_string(),
-                            title: str_field(entity, &["name", "title"])
-                                .unwrap_or_else(|| "Spotify".into()),
-                            url: format!("https://open.spotify.com/{kind}/{id}"),
-                            uploader: str_field(entity, &["subtitle"]),
-                            thumbnail: cover.clone(),
-                        }),
-                        entries: completas,
-                        cached_at: None,
-                    });
-                }
-                Ok(_) => {}
-                Err(e) => eprintln!("[recodio] no se pudo paginar la playlist: {e}"),
-            }
-        }
-        return Err(anyhow!(
-            "Spotify solo entrega las primeras {EMBED_MAX} canciones por esta vía"
-        ));
-    }
+    // Lista al tope: seguramente hay más. En vez de hacer esperar por la lista
+    // completa —que puede tardar minutos— se devuelven estas cien marcadas como
+    // incompletas y el resto se pide por detrás.
+    let recortada = kind == "playlist" && tracks.len() >= EMBED_MAX;
 
     let entries: Vec<Entry> = tracks
         .iter()
@@ -498,7 +490,50 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
         }),
         entries,
         cached_at: None,
+        partial: recortada,
+        key: String::new(),
     })
+}
+
+/// Pide la playlist entera. Es el camino lento: primero se intenta la API con el
+/// token del embed y, si no puede, se recurre a spotDL, que tarda minutos pero
+/// nunca se queda corto. Se llama por detrás, con las primeras cien ya en
+/// pantalla.
+pub async fn complete_spotify(url: &str, bins: &Binaries) -> Result<Vec<Entry>> {
+    let (kind, id) = spotify_ref(url).ok_or_else(|| anyhow!("no es un enlace de Spotify"))?;
+    if kind != "playlist" {
+        return Err(anyhow!("solo las playlists se entregan a trozos"));
+    }
+
+    let cliente = reqwest::Client::builder().user_agent(UA).build()?;
+    if let Ok(token) = token_del_embed(&cliente, &kind, &id).await {
+        match playlist_completa(&cliente, &id, &token).await {
+            Ok(todas) if todas.len() > EMBED_MAX => return Ok(todas),
+            Ok(_) => {}
+            Err(e) => eprintln!("[recodio] la vía rápida no pudo completar la lista: {e}"),
+        }
+    }
+
+    // Respaldo: lento, pero devuelve la lista completa sin depender de la API.
+    Ok(analyze_spotdl_cli(url, bins).await?.entries)
+}
+
+async fn token_del_embed(cliente: &reqwest::Client, kind: &str, id: &str) -> Result<String> {
+    let body = cliente
+        .get(format!("https://open.spotify.com/embed/{kind}/{id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    const OPEN: &str = r#"<script id="__NEXT_DATA__" type="application/json">"#;
+    let start = body.find(OPEN).ok_or_else(|| anyhow!("sin datos"))? + OPEN.len();
+    let end = body[start..].find("</script>").ok_or_else(|| anyhow!("truncado"))?;
+    let json: Value = serde_json::from_str(&body[start..start + end])?;
+    json.pointer("/props/pageProps/state/settings/session/accessToken")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("Spotify no entregó el token de sesión"))
 }
 
 async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
@@ -508,7 +543,12 @@ async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
             Err(e) => eprintln!("[recodio] listado rápido de Spotify no disponible ({e}); usando spotdl"),
         }
     }
+    analyze_spotdl_cli(url, bins).await
+}
 
+/// El camino lento: unos 31 s de arranque más 4,75 s por canción, pero devuelve
+/// la lista completa sin depender de ninguna API.
+async fn analyze_spotdl_cli(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
     let exe = bins.require("spotdl")?;
     let tmp = std::env::temp_dir().join(format!("recodio-{}.spotdl", uuid::Uuid::new_v4()));
 
@@ -594,6 +634,8 @@ async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
         playlist,
         entries,
         cached_at: None,
+        partial: false,
+        key: String::new(),
     })
 }
 
@@ -734,6 +776,8 @@ mod tests {
                 unavailable: false,
             }],
             cached_at: None,
+            partial: false,
+            key: String::new(),
         };
 
         let json = serde_json::to_string(&resultado).unwrap();

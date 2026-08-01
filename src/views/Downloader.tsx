@@ -19,7 +19,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BlockPicker } from "../components/BlockPicker";
 import { MissingTools } from "../components/MissingTools";
 import { Thumb } from "../components/Thumb";
@@ -54,6 +55,33 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [destDir, setDestDir] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [blockSize, setBlockSize] = useState(50);
+
+  // El análisis en curso, para que los envíos tardíos no se cuelen en otro.
+  const analisisActivo = useRef<string | null>(null);
+
+  useEffect(() => {
+    const mas = listen<[string, Entry[], boolean]>("analyze-more", (ev) => {
+      const [key, nuevas] = ev.payload;
+      if (key !== analisisActivo.current) return; // De un análisis ya descartado.
+      setResult((prev) => {
+        if (!prev) return prev;
+        const vistos = new Set(prev.entries.map((e) => e.sourceId));
+        const añadir = nuevas.filter((e) => !vistos.has(e.sourceId));
+        return { ...prev, entries: [...prev.entries, ...añadir], partial: false };
+      });
+    });
+    const fallo = listen<[string, string]>("analyze-failed", (ev) => {
+      const [key, mensaje] = ev.payload;
+      if (key !== analisisActivo.current) return;
+      setResult((prev) => (prev ? { ...prev, partial: false } : prev));
+      toast("error", `No se pudo completar la lista: ${mensaje}`);
+    });
+    return () => {
+      mas.then((f) => f());
+      fallo.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const existingOf = (e: Entry, k: Kind) =>
     k === "audio" ? e.existingAudio : e.existingVideo;
@@ -106,6 +134,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       // spotDL only produces audio, so don't offer a video toggle that lies.
       const nextKind: Kind = merged.source === "spotdl" ? "audio" : kind;
       setKind(nextKind);
+      analisisActivo.current = merged.key ?? null;
       setResult(merged);
       applyDefaults(merged, nextKind);
       setDestDir(null);
@@ -239,6 +268,16 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         />
       )}
 
+      {result?.partial && (
+        <div className="flex items-center gap-2.5 rounded-xl border border-accent2/30 bg-accent2/5 px-3 py-2 text-[12px]">
+          <Sparkles size={14} className="shrink-0 animate-pulse text-accent2" />
+          <span className="min-w-0 flex-1 leading-snug">
+            Spotify entrega las listas de cien en cien. Estas{" "}
+            {result.entries.length} ya se pueden descargar; el resto va llegando.
+          </span>
+        </div>
+      )}
+
       {result?.cachedAt && (
         <div className="flex items-center gap-2 rounded-xl border border-line bg-surface2 px-3 py-2 text-[12px] text-muted">
           <History size={14} className="shrink-0" />
@@ -284,7 +323,10 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
                   </p>
                 )}
               </div>
-              <IconButton title="Descartar" onClick={() => setResult(null)}>
+              <IconButton title="Descartar" onClick={() => {
+                  analisisActivo.current = null;
+                  setResult(null);
+                }}>
                 <X size={16} />
               </IconButton>
             </div>
