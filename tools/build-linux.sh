@@ -25,6 +25,7 @@ rsync -a --delete \
     --exclude dist \
     --exclude target \
     --exclude .git \
+    --exclude gen \
     "$SRC/" "$WORK/"
 
 cd "$WORK"
