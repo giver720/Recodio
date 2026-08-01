@@ -268,6 +268,13 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         />
       )}
 
+      {result?.notice && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-warn/40 bg-warn/5 px-3 py-2.5 text-[12px]">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0 text-warn" />
+          <span className="min-w-0 flex-1 leading-snug">{result.notice}</span>
+        </div>
+      )}
+
       {result?.partial && (
         <div className="flex items-center gap-2.5 rounded-xl border border-accent2/30 bg-accent2/5 px-3 py-2 text-[12px]">
           <Sparkles size={14} className="shrink-0 animate-pulse text-accent2" />

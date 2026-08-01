@@ -59,6 +59,8 @@ export interface AnalyzeResult {
   partial?: boolean;
   /** Identifica el análisis para casar los envíos posteriores. */
   key?: string;
+  /** Algo que conviene saber del resultado, aunque no sea un error. */
+  notice?: string;
   source: Source;
   isPlaylist: boolean;
   playlist: PlaylistInfo | null;

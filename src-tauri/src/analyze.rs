@@ -58,6 +58,10 @@ pub struct AnalyzeResult {
     /// Identifica este análisis para casar los envíos posteriores con él.
     #[serde(default)]
     pub key: String,
+    /// Algo que el usuario debe saber sobre este resultado, aunque no sea un
+    /// error: por ejemplo, que el enlace pedía una lista y no vino ninguna.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 pub fn is_spotify(url: &str) -> bool {
@@ -145,6 +149,8 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
     let mut cmd = async_command(exe);
     cmd.arg("--dump-single-json")
         .arg("--flat-playlist")
+        // Sin esto, yt-dlp decide por su cuenta qué hacer con `watch?v=…&list=…`.
+        .arg("--yes-playlist")
         .arg("--no-warnings")
         .arg("--ignore-config")
         .arg("--no-playlist-reverse");
@@ -162,6 +168,12 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
     let is_playlist = json.get("_type").and_then(Value::as_str) == Some("playlist");
     if !is_playlist {
         let entry = entry_from_ytdlp(&json, 1, None);
+        // El enlace pedía una lista y ha vuelto un vídeo suelto. Decirlo es mejor
+        // que enseñar un único elemento como si eso fuera todo.
+        let notice = url.contains("list=").then(|| {
+            "El enlace incluye una lista, pero YouTube solo ha devuelto este vídeo.              Puede que el identificador de la lista esté cortado al copiarlo, o que              la lista sea privada o ya no exista. Prueba a copiar de nuevo el enlace              desde YouTube."
+                .to_string()
+        });
         return Ok(AnalyzeResult {
             source: "ytdlp".into(),
             is_playlist: false,
@@ -170,6 +182,7 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
             cached_at: None,
             partial: false,
             key: String::new(),
+            notice,
         });
     }
 
@@ -218,6 +231,7 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
         cached_at: None,
         partial: false,
         key: String::new(),
+        notice: None,
     })
 }
 
@@ -439,6 +453,7 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
             cached_at: None,
             partial: false,
             key: String::new(),
+            notice: None,
         });
     }
 
@@ -492,6 +507,7 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
         cached_at: None,
         partial: recortada,
         key: String::new(),
+        notice: None,
     })
 }
 
@@ -636,6 +652,7 @@ async fn analyze_spotdl_cli(url: &str, bins: &Binaries) -> Result<AnalyzeResult>
         cached_at: None,
         partial: false,
         key: String::new(),
+        notice: None,
     })
 }
 
@@ -778,6 +795,7 @@ mod tests {
             cached_at: None,
             partial: false,
             key: String::new(),
+            notice: None,
         };
 
         let json = serde_json::to_string(&resultado).unwrap();

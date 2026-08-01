@@ -58,6 +58,45 @@ export function Library() {
     };
   }, []);
 
+  async function deletePlaylist(p: Playlist, deleteFiles: boolean) {
+    const aviso = deleteFiles
+      ? `¿Eliminar «${p.title}» y BORRAR sus ${p.itemCount} archivos del disco? Esto no se puede deshacer.`
+      : `¿Quitar «${p.title}» de la biblioteca? Los ${p.itemCount} archivos seguirán en tu disco.`;
+    if (!window.confirm(aviso)) return;
+    try {
+      const n = await api.libraryDeletePlaylist(p.id, deleteFiles);
+      toast(
+        "success",
+        deleteFiles
+          ? `«${p.title}» eliminada junto con ${n} archivos`
+          : `«${p.title}» quitada de la biblioteca; sus ${n} archivos siguen en el disco`,
+      );
+      if (bucket === p.id) setBucket("all");
+      useStore.setState((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  // Supr sobre la colección abierta la quita, como en cualquier gestor de
+  // archivos. Con Shift, además borra los archivos.
+  useEffect(() => {
+    function alPulsar(e: KeyboardEvent) {
+      if (e.key !== "Delete") return;
+      const enCampo =
+        e.target instanceof HTMLElement &&
+        ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName);
+      if (enCampo) return;
+      const p = playlists.find((x) => x.id === bucket);
+      if (!p) return;
+      e.preventDefault();
+      deletePlaylist(p, e.shiftKey);
+    }
+    window.addEventListener("keydown", alPulsar);
+    return () => window.removeEventListener("keydown", alPulsar);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bucket, playlists]);
+
   async function importFolder() {
     const picked = await openDialog({ directory: true });
     if (typeof picked !== "string") return;
@@ -211,6 +250,17 @@ export function Library() {
                   label: "Abrir el origen",
                   icon: <ExternalLink size={14} />,
                   onClick: () => api.openFolder(p.url),
+                },
+                {
+                  label: "Quitar de la biblioteca (Supr)",
+                  icon: <Trash2 size={14} />,
+                  onClick: () => deletePlaylist(p, false),
+                },
+                {
+                  label: "Eliminar también los archivos",
+                  icon: <Trash2 size={14} />,
+                  danger: true,
+                  onClick: () => deletePlaylist(p, true),
                 },
               ])
             }

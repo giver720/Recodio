@@ -228,6 +228,41 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// ¿Hay ya alguna entrada, de donde sea, que use ese archivo?
+    ///
+    /// Lo usa la importación de carpetas: si se añade la carpeta donde Recodio
+    /// descarga, sus archivos ya están en la biblioteca y volver a meterlos
+    /// duplicaría cada playlist.
+    pub fn file_already_known(&self, file_path: &str) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.query_row(
+            "SELECT 1 FROM items WHERE file_path = ?1 COLLATE NOCASE LIMIT 1",
+            params![file_path],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// Borra una playlist y las entradas que solo pertenecían a ella.
+    ///
+    /// Los archivos no se tocan salvo que se pida: quien quiera conservar la
+    /// música y solo deshacerse de la lista, la conserva.
+    pub fn delete_playlist(&self, playlist_id: &str, delete_files: bool) -> Result<usize> {
+        let items = self.list_items(Some(playlist_id), None)?;
+        let cuantas = items.len();
+        for item in items {
+            self.delete_item(&item.id, delete_files)?;
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM playlists WHERE id = ?1", params![playlist_id])?;
+        Ok(cuantas)
+    }
+
     pub fn upsert_item(&self, item: &LibraryItem) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

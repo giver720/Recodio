@@ -84,6 +84,7 @@ async fn analyze_url(
                         cached_at: None,
                         partial: false,
                         key: key.clone(),
+                        notice: None,
                     };
                     if let Ok(payload) = serde_json::to_string(&completo) {
                         let _ = core.db.cache_put(&key, &payload);
@@ -274,6 +275,21 @@ fn library_items(
 #[tauri::command]
 fn library_delete(id: String, delete_file: bool, state: State<'_, AppState>) -> CmdResult<()> {
     state.core.db.delete_item(&id, delete_file).map_err(err)
+}
+
+/// Quita una colección de la biblioteca. Por defecto no toca los archivos: se
+/// deja de ver la lista, pero la música sigue en el disco.
+#[tauri::command]
+fn library_delete_playlist(
+    playlist_id: String,
+    delete_files: bool,
+    state: State<'_, AppState>,
+) -> CmdResult<usize> {
+    state
+        .core
+        .db
+        .delete_playlist(&playlist_id, delete_files)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -643,6 +659,7 @@ pub fn run() {
             library_items,
             library_delete,
             library_prune,
+            library_delete_playlist,
             library_repair,
             library_health,
             library_import_folder,

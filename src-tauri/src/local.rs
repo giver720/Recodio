@@ -33,6 +33,11 @@ pub struct ImportReport {
     pub title: String,
 }
 
+/// La ruta tal cual se guarda en la biblioteca.
+fn item_path_str(ruta: &Path) -> String {
+    ruta.to_string_lossy().into_owned()
+}
+
 fn tipo_de(ruta: &Path) -> Option<&'static str> {
     let ext = ruta.extension()?.to_str()?.to_ascii_lowercase();
     if AUDIO.contains(&ext.as_str()) {
@@ -221,14 +226,13 @@ pub fn import_folder(
         on_progress(i, archivos.len());
 
         let kind = tipo_de(ruta).unwrap_or("audio");
-        let id_archivo = ruta.to_string_lossy().to_lowercase();
 
-        // Lo ya importado se salta sin leer metadatos: por eso volver a escanear
-        // una carpeta grande es casi instantáneo.
-        if db
-            .find_existing("local", &id_archivo, kind, Some(&playlist_id))
-            .is_some()
-        {
+        // Lo ya conocido se salta sin leer metadatos, y eso incluye lo que
+        // Recodio descargó: añadir la carpeta de descargas es lo primero que
+        // hace cualquiera, y sin esto duplicaría todas las playlists. De paso,
+        // es lo que hace que volver a escanear una carpeta grande sea
+        // instantáneo.
+        if db.file_already_known(&item_path_str(ruta)) {
             informe.skipped += 1;
             continue;
         }
@@ -238,7 +242,7 @@ pub fn import_folder(
             id: uuid::Uuid::new_v4().to_string(),
             source: "local".into(),
             extractor: "local".into(),
-            source_id: id_archivo,
+            source_id: ruta.to_string_lossy().to_lowercase(),
             url: String::new(),
             title: datos.title,
             uploader: datos.artist,
@@ -353,6 +357,81 @@ mod tests {
         assert!(!empieza_por("Last Resort", "Papa Roach"));
         assert!(!empieza_por("Roachford - Cuddly Toy", "Papa Roach"));
         assert!(!empieza_por("cualquier cosa", ""));
+    }
+
+    /// Lo primero que hace cualquiera es añadir la carpeta donde Recodio
+    /// descarga. Sin comprobarlo, cada playlist aparecía dos veces: la
+    /// descargada y una copia local con los mismos archivos.
+    #[test]
+    fn no_reimporta_lo_que_ya_esta_descargado() {
+        let raiz = carpeta("ya-descargado");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let descargas = raiz.join("Recodio");
+        std::fs::create_dir_all(&descargas).unwrap();
+
+        let ya = descargas.join("Willie Colon - El Gran Varon.mp3");
+        std::fs::write(&ya, b"x").unwrap();
+        std::fs::write(descargas.join("nueva de verdad.mp3"), b"x").unwrap();
+
+        // Simula una descarga previa: ese archivo ya está en la biblioteca.
+        db.upsert_item(&LibraryItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "spotdl".into(),
+            extractor: "spotify".into(),
+            source_id: "abc123".into(),
+            url: String::new(),
+            title: "Willie Colón - El Gran Varón".into(),
+            uploader: None,
+            duration: None,
+            thumbnail: None,
+            file_path: ya.to_string_lossy().into_owned(),
+            file_size: 1,
+            kind: "audio".into(),
+            ext: "mp3".into(),
+            playlist_id: None,
+            playlist_index: None,
+            downloaded_at: 0,
+        })
+        .unwrap();
+
+        let informe = import_folder(&db, &bins, &descargas, |_, _| {}).unwrap();
+        assert_eq!(informe.found, 2);
+        assert_eq!(informe.added, 1, "solo la que no estaba");
+        assert_eq!(informe.skipped, 1, "la ya descargada se respeta");
+        assert_eq!(
+            db.list_items(None, None).unwrap().len(),
+            2,
+            "no puede haber dos entradas para el mismo archivo"
+        );
+
+        std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    #[test]
+    fn quitar_una_coleccion_no_borra_los_archivos() {
+        let raiz = carpeta("borrar");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let musica = raiz.join("musica");
+        std::fs::create_dir_all(&musica).unwrap();
+        let uno = musica.join("una.mp3");
+        std::fs::write(&uno, b"x").unwrap();
+        std::fs::write(musica.join("otra.mp3"), b"x").unwrap();
+
+        let informe = import_folder(&db, &bins, &musica, |_, _| {}).unwrap();
+        assert_eq!(informe.added, 2);
+
+        let quitadas = db.delete_playlist(&informe.playlist_id, false).unwrap();
+        assert_eq!(quitadas, 2);
+        assert!(db.list_items(None, None).unwrap().is_empty());
+        assert!(uno.exists(), "el archivo debe seguir en el disco");
+        assert!(
+            db.list_playlists().unwrap().is_empty(),
+            "la colección desaparece de la lista"
+        );
+
+        std::fs::remove_dir_all(&raiz).ok();
     }
 
     #[test]
