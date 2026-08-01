@@ -228,7 +228,7 @@ export function Library() {
             <EmptyState
               icon={<LibraryIcon size={22} />}
               title="Aquí no hay nada todavía"
-              body="Lo que descargues aparecerá en esta biblioteca, agrupado por playlist y listo para abrirse en VLC."
+              body="Lo que descargues aparecerá en esta biblioteca, agrupado por playlist y listo para reproducirse."
             />
           ) : (
             <div className="flex flex-col gap-1.5">

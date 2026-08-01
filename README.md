@@ -2,9 +2,9 @@
 
 Descargador de vídeo y música con una interfaz que no parece un formulario.
 Envuelve **yt-dlp** y **spotDL** con cola paralela, SponsorBlock, detección de
-duplicados y una biblioteca local desde la que abrir los archivos en VLC.
+duplicados y una biblioteca local desde la que abrir los archivos.
 
-> Estado: **v0.1.1 — Windows y Linux**. El port a Android reutilizará este mismo
+> Estado: **v0.1.5 — Windows y Linux**. El port a Android reutilizará este mismo
 > frontend; ver [Android](#android).
 
 ## Qué hace
@@ -27,7 +27,7 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
   extracción de audio, recorte de SponsorBlock).
 - **Playlists locales automáticas**: al descargar una playlist, Recodio le da su
   propia carpeta y escribe dentro un `.m3u8` con el orden original y rutas
-  relativas — se abre en VLC de un doble clic y la carpeta se puede mover o
+  relativas — lo abre cualquier reproductor y la carpeta se puede mover o
   copiar a otro equipo sin romper nada. No hay que exportar nada a mano.
 - **Biblioteca** por playlist / vídeos / música, con búsqueda y reproducción en
   el reproductor externo que elijas.
@@ -42,8 +42,8 @@ duplicados y una biblioteca local desde la que abrir los archivos en VLC.
 > resultado que cuadre en duración con el original. Así el progreso es real por
 > bytes, se aplican los mismos ajustes que al resto, y hay una dependencia menos.
 > spotDL queda como respaldo opcional del listado si Spotify cambia su página.
- Si
-falta alguna, Recodio lo dice al abrir la pantalla de Descargar y ofrece
+
+Si falta alguna, Recodio lo dice al abrir la pantalla de Descargar y ofrece
 descargárselas a su propia carpeta de datos, sin permisos de administrador y sin
 tocar el sistema. También están en **Ajustes › Herramientas**.
 
@@ -74,16 +74,16 @@ React + TypeScript (UI)
 Rust  ─ cola paralela, SQLite (biblioteca), detección de duplicados
         │  procesos hijo
         ▼
-yt-dlp · spotDL · ffmpeg
+yt-dlp · ffmpeg
 ```
 
 | Ruta | Qué contiene |
 | --- | --- |
 | `src-tauri/src/queue.rs` | Cola con concurrencia, cancelación y eventos de progreso |
 | `src-tauri/src/ytdlp.rs` | Construcción de argumentos y parseo del progreso de yt-dlp |
-| `src-tauri/src/spotdl.rs` | Lo mismo para spotDL |
 | `src-tauri/src/analyze.rs` | Previsualización de enlaces y playlists |
 | `src-tauri/src/db.rs` | Biblioteca en SQLite y detección de duplicados |
+| `src-tauri/src/repair.rs` | Reparación de entradas cruzadas |
 | `src/views/` | Las cuatro pantallas: Descargar, Cola, Biblioteca, Ajustes |
 | `tools/make_icon.py` | Genera el icono; la misma geometría vive en `src/components/Mark.tsx` |
 
@@ -197,15 +197,3 @@ de fallar en silencio.
 Pendiente. `npm run tauri android init` genera el proyecto, pero ahí no se puede
 ejecutar un binario de yt-dlp: habrá que empaquetar Python (Chaquopy) o convertir
 el móvil en cliente de un Recodio de escritorio. La interfaz no cambia.
-
-## Licencia
-
-Pendiente de definir.
-
-## Licencia
-
-MIT — ver [LICENSE](LICENSE).
-
-Recodio **invoca** yt-dlp, spotDL y ffmpeg como programas externos; no incorpora
-su código ni enlaza con ellos, así que sus licencias no se propagan a este
-proyecto. Cada uno conserva la suya y se descarga de su origen oficial.
