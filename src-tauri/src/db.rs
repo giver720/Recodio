@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -228,24 +229,23 @@ impl Db {
             .unwrap_or_default()
     }
 
-    /// ¿Hay ya alguna entrada, de donde sea, que use ese archivo?
+    /// Todas las rutas que la biblioteca ya conoce, en minúsculas.
     ///
-    /// Lo usa la importación de carpetas: si se añade la carpeta donde Recodio
+    /// Lo usan la importación y el rastreo: si se añade la carpeta donde Recodio
     /// descarga, sus archivos ya están en la biblioteca y volver a meterlos
-    /// duplicaría cada playlist.
-    pub fn file_already_known(&self, file_path: &str) -> bool {
+    /// duplicaría cada playlist. Se devuelve el conjunto entero en vez de
+    /// resolver archivo por archivo porque un rastreo toca miles de rutas y una
+    /// consulta por cada una convierte un segundo en un minuto.
+    pub fn known_files(&self) -> HashSet<String> {
         let Ok(conn) = self.conn.lock() else {
-            return false;
+            return HashSet::new();
         };
-        conn.query_row(
-            "SELECT 1 FROM items WHERE file_path = ?1 COLLATE NOCASE LIMIT 1",
-            params![file_path],
-            |_| Ok(()),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .is_some()
+        let Ok(mut stmt) = conn.prepare("SELECT file_path FROM items") else {
+            return HashSet::new();
+        };
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).map(|p| p.to_lowercase()).collect())
+            .unwrap_or_default()
     }
 
     /// Borra una playlist y las entradas que solo pertenecían a ella.

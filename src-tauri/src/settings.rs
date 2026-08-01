@@ -43,6 +43,12 @@ impl Default for DuplicatePolicy {
 pub struct Settings {
     pub video_dir: PathBuf,
     pub audio_dir: PathBuf,
+    /// Carpetas del equipo que el rastreo repasa además de las de descarga.
+    ///
+    /// Lo que aparezca en ellas entra en la biblioteca sin agrupar, porque la
+    /// música que no está en ninguna lista es la mayoría de la de cualquiera.
+    /// Vacío de fábrica: rastrear el disco de alguien sin que lo haya pedido no.
+    pub watched_dirs: Vec<PathBuf>,
     /// How many downloads run at the same time.
     pub concurrency: usize,
     pub duplicate_policy: DuplicatePolicy,
@@ -105,6 +111,7 @@ impl Default for Settings {
         Self {
             video_dir: default_download_dir(),
             audio_dir: default_audio_dir(),
+            watched_dirs: Vec::new(),
             concurrency: 3,
             duplicate_policy: DuplicatePolicy::Skip,
 
@@ -147,7 +154,31 @@ impl Default for Settings {
     }
 }
 
+/// Carpetas del sistema donde suele haber música y vídeo, si existen.
+///
+/// No se rastrean solas: la interfaz las ofrece para añadirlas de un clic, que
+/// es la diferencia entre sugerir y meterse donde no te llaman.
+pub fn suggested_dirs() -> Vec<PathBuf> {
+    [dirs::audio_dir(), dirs::video_dir(), dirs::download_dir()]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
 impl Settings {
+    /// Todo lo que repasa un rastreo: las carpetas de descarga van siempre,
+    /// porque lo que Recodio deja ahí es biblioteca por definición.
+    pub fn scan_roots(&self) -> Vec<PathBuf> {
+        let mut raices = vec![self.video_dir.clone(), self.audio_dir.clone()];
+        for d in &self.watched_dirs {
+            if !raices.iter().any(|r| r == d) {
+                raices.push(d.clone());
+            }
+        }
+        raices
+    }
+
     pub fn load(path: &std::path::Path) -> Self {
         std::fs::read_to_string(path)
             .ok()

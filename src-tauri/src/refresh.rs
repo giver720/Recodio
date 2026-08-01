@@ -9,13 +9,15 @@ use crate::db::Db;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshReport {
     /// Archivos nuevos encontrados en las carpetas añadidas.
     pub imported: usize,
+    /// Archivos sueltos nuevos encontrados en las carpetas vigiladas.
+    pub scanned: usize,
     /// Entradas retiradas porque su archivo ya no está.
     pub missing: usize,
     /// Entradas retiradas porque no correspondían a su archivo.
@@ -45,6 +47,7 @@ pub fn refresh(
     db: &Db,
     bins: &Binaries,
     data_dir: &Path,
+    raices: &[PathBuf],
     on_progress: impl Fn(Phase, usize, usize) + Send + Sync,
 ) -> Result<RefreshReport> {
     let mut informe = RefreshReport::default();
@@ -65,6 +68,15 @@ pub fn refresh(
                 informe.imported += r.added;
             }
         }
+    }
+
+    // 1b. Y en las carpetas vigiladas puede haber aparecido cualquier cosa
+    //     suelta: un mp3 descargado con otra cosa, un vídeo copiado a mano.
+    if !raices.is_empty() {
+        let r = crate::local::scan_loose(db, bins, raices, |hechos, total| {
+            on_progress(Phase::Scanning, hechos, total);
+        })?;
+        informe.scanned = r.added;
     }
 
     // 2. Lo que ya no está, y lo que nunca fue suyo.
@@ -155,7 +167,7 @@ mod prueba_real {
             .count();
 
         let t = std::time::Instant::now();
-        let informe = refresh(&db, &bins, &raiz, |_, _, _| {}).unwrap();
+        let informe = refresh(&db, &bins, &raiz, &[], |_, _, _| {}).unwrap();
         let tardado = t.elapsed();
 
         let despues = db.list_items(None, None).unwrap();

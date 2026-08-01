@@ -32,6 +32,18 @@ export function eta(seconds: number | null | undefined): string {
   return `${(seconds / 3600).toFixed(1)} h`;
 }
 
+/** La carpeta que contiene el archivo, con la ruta entera. */
+export function folderOf(filePath: string): string {
+  const i = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  return i > 0 ? filePath.slice(0, i) : filePath;
+}
+
+/** Solo el nombre de la carpeta, que es lo que cabe en una lista. */
+export function folderName(path: string): string {
+  const partes = path.split(/[\\/]/).filter(Boolean);
+  return partes[partes.length - 1] ?? path;
+}
+
 export function relativeDate(unixSeconds: number): string {
   const diff = Date.now() / 1000 - unixSeconds;
   if (diff < 60) return "hace un momento";

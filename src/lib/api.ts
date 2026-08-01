@@ -10,6 +10,7 @@ import type {
   PlayerOption,
   RefreshReport,
   RepairReport,
+  ScanReport,
   Playlist,
   PlaylistInfo,
   QueueStats,
@@ -73,6 +74,10 @@ export const api = {
   libraryRefresh: () => invoke<RefreshReport>("library_refresh"),
   libraryImportFolder: (path: string) =>
     invoke<ImportReport>("library_import_folder", { path }),
+  /** Sin `paths` rastrea las carpetas de descarga más las vigiladas. */
+  libraryScan: (paths?: string[]) =>
+    invoke<ScanReport>("library_scan", { paths: paths ?? null }),
+  suggestedFolders: () => invoke<string[]>("suggested_folders"),
   exportM3u: (playlistId: string) =>
     invoke<string>("export_m3u", { playlistId }),
 

@@ -13,11 +13,21 @@ export interface RepairReport {
 /** Resultado de poner la biblioteca al día. */
 export interface RefreshReport {
   imported: number;
+  /** Archivos sueltos nuevos hallados en las carpetas vigiladas. */
+  scanned: number;
   missing: number;
   mismatched: number;
   thumbnails: number;
   thumbnailsCleaned: number;
   folders: number;
+}
+
+/** Resultado de rastrear las carpetas vigiladas en busca de sueltos. */
+export interface ScanReport {
+  roots: number;
+  found: number;
+  added: number;
+  skipped: number;
 }
 
 export type RefreshPhase = "scanning" | "checking" | "thumbnails";
@@ -164,6 +174,8 @@ export type DuplicatePolicy = "skip" | "overwrite" | "ask";
 export interface Settings {
   videoDir: string;
   audioDir: string;
+  /** Carpetas del equipo que el rastreo repasa además de las de descarga. */
+  watchedDirs: string[];
   concurrency: number;
   duplicatePolicy: DuplicatePolicy;
   sponsorblock: boolean;

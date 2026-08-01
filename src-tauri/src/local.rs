@@ -4,16 +4,31 @@
 //! música de siempre entra en la biblioteca y se reproduce igual. Volver a
 //! escanearla añade lo nuevo y no toca lo que ya estaba, que es lo que se espera
 //! de una carpeta que crece.
+//!
+//! Son dos maneras de meter archivos, y la diferencia importa:
+//!
+//! * [`import_folder`] añade la carpeta **como colección**: todo lo que hay
+//!   dentro queda agrupado bajo su nombre, como una playlist más.
+//! * [`scan_loose`] rastrea carpetas **sin agrupar nada**: cada mp3 o mp4 entra
+//!   por su cuenta y aparece en «Sueltos». Es lo que hace falta para la música
+//!   que no vive en ninguna lista, que en cualquier equipo es la mayoría.
 
 use crate::binaries::Binaries;
 use crate::db::{Db, LibraryItem, Playlist};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const AUDIO: [&str; 8] = ["mp3", "m4a", "flac", "opus", "ogg", "wav", "aac", "wma"];
-const VIDEO: [&str; 7] = ["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv"];
+const AUDIO: [&str; 14] = [
+    "mp3", "m4a", "flac", "opus", "ogg", "oga", "wav", "aac", "wma", "aiff", "aif", "alac", "mka",
+    "mp2",
+];
+const VIDEO: [&str; 14] = [
+    "mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "mpg", "mpeg", "m2ts", "ts", "3gp",
+    "ogv",
+];
 
 /// Profundidad máxima al recorrer subcarpetas. Suficiente para
 /// `Música/Artista/Álbum/pista` y evita perderse en árboles enormes.
@@ -68,10 +83,81 @@ fn recorrer(dir: &Path, profundidad: u32, salida: &mut Vec<PathBuf>) {
             if !oculta {
                 recorrer(&ruta, profundidad - 1, salida);
             }
-        } else if tipo_de(&ruta).is_some() {
+        } else if tipo_de(&ruta).is_some() && !es_basura(&ruta) {
             salida.push(ruta);
         }
     }
+}
+
+/// Un archivo con la extensión correcta que aun así no es música ni vídeo.
+///
+/// Una descarga interrumpida deja restos de cero bytes, y un reproductor a
+/// medio escribir suena a silencio: meterlos en la biblioteca solo sirve para
+/// que la primera vez que se le da al play no pase nada.
+fn es_basura(ruta: &Path) -> bool {
+    ruta.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.') || n.starts_with("._"))
+        .unwrap_or(false)
+        || std::fs::metadata(ruta).map(|m| m.len() == 0).unwrap_or(true)
+}
+
+/// Cuándo se creó el archivo, para que ordenar por fecha signifique algo.
+///
+/// Lo descargado tiene su fecha de descarga; lo que ya estaba en el disco no,
+/// así que se toma la del archivo. Sin esto una carpeta de música de años
+/// entera aparecería como si hubiera llegado toda en el mismo segundo.
+fn fecha_de(ruta: &Path, por_defecto: i64) -> i64 {
+    std::fs::metadata(ruta)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .filter(|&t| t > 0)
+        .unwrap_or(por_defecto)
+}
+
+/// Construye la entrada de biblioteca de un archivo del equipo.
+fn item_de(
+    ruta: &Path,
+    ffprobe: Option<&Path>,
+    playlist_id: Option<String>,
+    playlist_index: Option<i64>,
+    ahora: i64,
+) -> LibraryItem {
+    let datos = leer_datos(ruta, ffprobe);
+    LibraryItem {
+        id: uuid::Uuid::new_v4().to_string(),
+        source: "local".into(),
+        extractor: "local".into(),
+        source_id: ruta.to_string_lossy().to_lowercase(),
+        url: String::new(),
+        title: datos.title,
+        uploader: datos.artist,
+        duration: datos.duration,
+        thumbnail: None,
+        file_path: item_path_str(ruta),
+        file_size: std::fs::metadata(ruta).map(|m| m.len() as i64).unwrap_or(0),
+        kind: tipo_de(ruta).unwrap_or("audio").to_string(),
+        ext: ruta
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+        playlist_id,
+        playlist_index,
+        downloaded_at: fecha_de(ruta, ahora),
+    }
+}
+
+/// ffprobe viaja junto a ffmpeg; si solo está este, se busca al lado.
+fn resolver_ffprobe(bins: &Binaries) -> Option<PathBuf> {
+    bins.resolve("ffprobe")
+        .or_else(|| {
+            bins.resolve("ffmpeg")
+                .map(|f| f.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }))
+        })
+        .filter(|p| p.is_file())
 }
 
 /// ¿El texto arranca con ese nombre, ignorando mayúsculas y acentos?
@@ -215,52 +301,103 @@ pub fn import_folder(
         ..Default::default()
     };
 
-    let ffprobe = bins.resolve("ffprobe").or_else(|| bins.resolve("ffmpeg").map(|f| {
-        // ffprobe viaja junto a ffmpeg; si solo está este, se busca al lado.
-        f.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" })
-    }));
-    let ffprobe = ffprobe.filter(|p| p.is_file());
-
+    let ffprobe = resolver_ffprobe(bins);
+    // Una sola consulta en vez de una por archivo: en una carpeta de miles de
+    // canciones la diferencia entre repasarla en un segundo o en un minuto está
+    // justo aquí.
+    let conocidos = db.known_files();
     let ahora = chrono::Utc::now().timestamp();
+
     for (i, ruta) in archivos.iter().enumerate() {
         on_progress(i, archivos.len());
 
-        let kind = tipo_de(ruta).unwrap_or("audio");
-
         // Lo ya conocido se salta sin leer metadatos, y eso incluye lo que
         // Recodio descargó: añadir la carpeta de descargas es lo primero que
-        // hace cualquiera, y sin esto duplicaría todas las playlists. De paso,
-        // es lo que hace que volver a escanear una carpeta grande sea
-        // instantáneo.
-        if db.file_already_known(&item_path_str(ruta)) {
+        // hace cualquiera, y sin esto duplicaría todas las playlists.
+        if conocidos.contains(&ruta.to_string_lossy().to_lowercase()) {
             informe.skipped += 1;
             continue;
         }
 
-        let datos = leer_datos(ruta, ffprobe.as_deref());
-        let item = LibraryItem {
-            id: uuid::Uuid::new_v4().to_string(),
-            source: "local".into(),
-            extractor: "local".into(),
-            source_id: ruta.to_string_lossy().to_lowercase(),
-            url: String::new(),
-            title: datos.title,
-            uploader: datos.artist,
-            duration: datos.duration,
-            thumbnail: None,
-            file_path: ruta.to_string_lossy().into_owned(),
-            file_size: std::fs::metadata(ruta).map(|m| m.len() as i64).unwrap_or(0),
-            kind: kind.to_string(),
-            ext: ruta
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase(),
-            playlist_id: Some(playlist_id.clone()),
-            playlist_index: Some(i as i64 + 1),
-            downloaded_at: ahora,
-        };
+        let item = item_de(
+            ruta,
+            ffprobe.as_deref(),
+            Some(playlist_id.clone()),
+            Some(i as i64 + 1),
+            ahora,
+        );
+        if db.upsert_item(&item).is_ok() {
+            informe.added += 1;
+        }
+    }
+    on_progress(archivos.len(), archivos.len());
 
+    Ok(informe)
+}
+
+/// Resultado de rastrear el equipo en busca de archivos sueltos.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReport {
+    /// Carpetas rastreadas de verdad (las que no existen no cuentan).
+    pub roots: usize,
+    pub found: usize,
+    pub added: usize,
+    pub skipped: usize,
+}
+
+/// Rastrea carpetas y añade a la biblioteca todo lo que no estuviera ya, **sin
+/// agrupar nada**.
+///
+/// La biblioteca no puede depender de que el usuario haya organizado su música
+/// en carpetas con sentido: un mp3 tirado en Descargas es tan parte de la
+/// biblioteca como el que llegó dentro de una playlist. Estos entran sin
+/// colección, así que se pueden ver todos juntos en «Sueltos» y siguen
+/// apareciendo en Todo, Música y Vídeos como cualquier otro.
+///
+/// Lo que ya está en la biblioteca no se toca, venga de una descarga o de una
+/// carpeta importada: rastrear encima de lo de siempre nunca duplica.
+pub fn scan_loose(
+    db: &Db,
+    bins: &Binaries,
+    raices: &[PathBuf],
+    on_progress: impl Fn(usize, usize) + Send + Sync,
+) -> Result<ScanReport> {
+    let mut informe = ScanReport::default();
+
+    // Una carpeta puede estar dentro de otra de la lista (Música y
+    // Música/Rock). Sin quitar las repetidas, cada archivo se leería dos veces.
+    let mut archivos: Vec<PathBuf> = Vec::new();
+    let mut vistos: HashSet<String> = HashSet::new();
+    for raiz in raices {
+        if !raiz.is_dir() {
+            continue;
+        }
+        informe.roots += 1;
+        let mut encontrados = Vec::new();
+        recorrer(raiz, MAX_PROFUNDIDAD, &mut encontrados);
+        for ruta in encontrados {
+            if vistos.insert(ruta.to_string_lossy().to_lowercase()) {
+                archivos.push(ruta);
+            }
+        }
+    }
+    archivos.sort();
+    informe.found = archivos.len();
+
+    let ffprobe = resolver_ffprobe(bins);
+    let conocidos = db.known_files();
+    let ahora = chrono::Utc::now().timestamp();
+
+    for (i, ruta) in archivos.iter().enumerate() {
+        on_progress(i, archivos.len());
+
+        if conocidos.contains(&ruta.to_string_lossy().to_lowercase()) {
+            informe.skipped += 1;
+            continue;
+        }
+
+        let item = item_de(ruta, ffprobe.as_deref(), None, None, ahora);
         if db.upsert_item(&item).is_ok() {
             informe.added += 1;
         }
@@ -432,6 +569,119 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    /// El motivo de todo esto: un mp3 tirado en Descargas es biblioteca, y no
+    /// tiene por qué acabar metido en una colección que nadie ha creado.
+    #[test]
+    fn el_rastreo_deja_los_archivos_sueltos_sin_coleccion() {
+        let raiz = carpeta("sueltos");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let descargas = raiz.join("Descargas");
+        std::fs::create_dir_all(descargas.join("Album")).unwrap();
+        std::fs::write(descargas.join("suelta.mp3"), b"x").unwrap();
+        std::fs::write(descargas.join("peli.mp4"), b"x").unwrap();
+        std::fs::write(descargas.join("Album/pista.flac"), b"x").unwrap();
+        std::fs::write(descargas.join("apuntes.txt"), b"x").unwrap();
+
+        let informe = scan_loose(&db, &bins, &[descargas.clone()], |_, _| {}).unwrap();
+        assert_eq!(informe.roots, 1);
+        assert_eq!(informe.found, 3, "el .txt no es biblioteca");
+        assert_eq!(informe.added, 3);
+
+        let items = db.list_items(None, None).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(
+            items.iter().all(|i| i.playlist_id.is_none()),
+            "el rastreo no debe inventar colecciones"
+        );
+        assert!(db.list_playlists().unwrap().is_empty());
+
+        // Rastrear otra vez no duplica nada.
+        let otra = scan_loose(&db, &bins, &[descargas], |_, _| {}).unwrap();
+        assert_eq!(otra.added, 0);
+        assert_eq!(otra.skipped, 3);
+        assert_eq!(db.list_items(None, None).unwrap().len(), 3);
+
+        std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    /// Rastrear encima de una carpeta ya importada no puede duplicar su
+    /// contenido ni sacarlo de su colección.
+    #[test]
+    fn el_rastreo_respeta_lo_que_ya_esta_en_una_coleccion() {
+        let raiz = carpeta("rastreo-encima");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let musica = raiz.join("musica");
+        std::fs::create_dir_all(&musica).unwrap();
+        std::fs::write(musica.join("una.mp3"), b"x").unwrap();
+
+        let importada = import_folder(&db, &bins, &musica, |_, _| {}).unwrap();
+        assert_eq!(importada.added, 1);
+
+        std::fs::write(musica.join("nueva.mp3"), b"x").unwrap();
+        let informe = scan_loose(&db, &bins, &[musica], |_, _| {}).unwrap();
+        assert_eq!(informe.skipped, 1, "la ya importada se respeta");
+        assert_eq!(informe.added, 1, "la nueva entra suelta");
+
+        let items = db.list_items(None, None).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items.iter().filter(|i| i.playlist_id.is_some()).count(), 1);
+
+        std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    /// Vigilar «Música» y «Música/Rock» a la vez no puede leer todo dos veces.
+    #[test]
+    fn las_carpetas_anidadas_no_se_recorren_dos_veces() {
+        let raiz = carpeta("anidadas");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let musica = raiz.join("musica");
+        let rock = musica.join("rock");
+        std::fs::create_dir_all(&rock).unwrap();
+        std::fs::write(rock.join("una.mp3"), b"x").unwrap();
+
+        let informe = scan_loose(&db, &bins, &[musica, rock], |_, _| {}).unwrap();
+        assert_eq!(informe.found, 1);
+        assert_eq!(informe.added, 1);
+
+        std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    /// Una descarga interrumpida deja un archivo de cero bytes con el nombre
+    /// puesto: meterlo en la biblioteca es prometer una canción que no suena.
+    #[test]
+    fn los_archivos_vacios_no_entran() {
+        let raiz = carpeta("vacios");
+        let db = Db::open(&raiz.join("test.sqlite")).unwrap();
+        let bins = Binaries::new(raiz.join("bin"));
+        let d = raiz.join("d");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("buena.mp3"), b"x").unwrap();
+        std::fs::write(d.join("a medias.mp3"), b"").unwrap();
+        std::fs::write(d.join("cancion.mp3.part"), b"xxx").unwrap();
+
+        let informe = scan_loose(&db, &bins, &[d], |_, _| {}).unwrap();
+        assert_eq!(informe.found, 1, "solo la que tiene contenido de verdad");
+
+        std::fs::remove_dir_all(&raiz).ok();
+    }
+
+    /// Los formatos menos habituales también son biblioteca: quien tiene una
+    /// carpeta de .avi de hace años no entiende que la app diga que está vacía.
+    #[test]
+    fn reconoce_los_formatos_menos_habituales() {
+        assert_eq!(tipo_de(Path::new("a/b.aiff")), Some("audio"));
+        assert_eq!(tipo_de(Path::new("a/b.oga")), Some("audio"));
+        assert_eq!(tipo_de(Path::new("a/b.MKA")), Some("audio"));
+        assert_eq!(tipo_de(Path::new("a/b.flv")), Some("video"));
+        assert_eq!(tipo_de(Path::new("a/b.mpeg")), Some("video"));
+        assert_eq!(tipo_de(Path::new("a/b.ts")), Some("video"));
+        assert_eq!(tipo_de(Path::new("a/b.part")), None);
+        assert_eq!(tipo_de(Path::new("a/b.srt")), None);
     }
 
     #[test]

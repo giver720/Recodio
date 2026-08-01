@@ -321,6 +321,43 @@ async fn library_import_folder(
     .map_err(err)
 }
 
+/// Rastrea las carpetas vigiladas y añade lo que no estuviera, **sin agrupar**.
+///
+/// Es lo que hace que la biblioteca sea la música del equipo y no solo la que
+/// pasó por Recodio: un mp3 suelto en Descargas entra igual que uno descargado.
+/// Emite `scan-progress` con (hechos, total).
+#[tauri::command]
+async fn library_scan(
+    paths: Option<Vec<String>>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<local::ScanReport> {
+    use tauri::Emitter;
+    let core = state.core.clone();
+    let raices: Vec<PathBuf> = match paths {
+        Some(p) if !p.is_empty() => p.into_iter().map(PathBuf::from).collect(),
+        _ => core.settings.read().unwrap().scan_roots(),
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        local::scan_loose(&core.db, &core.bins, &raices, |hechos, total| {
+            let _ = app.emit("scan-progress", (hechos, total));
+        })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+/// Carpetas del sistema con música o vídeo que merece la pena ofrecer.
+#[tauri::command]
+fn suggested_folders() -> Vec<String> {
+    settings::suggested_dirs()
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Subtítulos que acompañan a un vídeo, listos para cargar en el reproductor.
 #[tauri::command]
 async fn subtitles_for(
@@ -347,9 +384,10 @@ async fn library_refresh(
     let core = state.core.clone();
     let data_dir = app.path().app_data_dir().map_err(err)?;
     let emisor = app.clone();
+    let raices = core.settings.read().unwrap().scan_roots();
 
     tauri::async_runtime::spawn_blocking(move || {
-        refresh::refresh(&core.db, &core.bins, &data_dir, |fase, hechos, total| {
+        refresh::refresh(&core.db, &core.bins, &data_dir, &raices, |fase, hechos, total| {
             let _ = emisor.emit("refresh-progress", (fase, hechos, total));
         })
     })
@@ -707,6 +745,8 @@ pub fn run() {
             library_refresh,
             subtitles_for,
             library_import_folder,
+            library_scan,
+            suggested_folders,
             export_m3u,
             play_file,
             reveal_file,
