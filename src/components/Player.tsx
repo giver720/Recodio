@@ -66,11 +66,19 @@ export function Player() {
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
-      } else {
-        // Se amplía primero: en la barra de abajo no hay nada que llenar.
-        if (!usePlayer.getState().expanded) usePlayer.getState().setExpanded(true);
-        await contenedor.current?.requestFullscreen();
+        return;
       }
+      // Se amplía primero: en la barra de abajo no hay nada que llenar. Y hay
+      // que dejar que se pinte, porque el contenedor está oculto mientras el
+      // reproductor va replegado y el navegador rechaza poner en pantalla
+      // completa un elemento que todavía no se ve.
+      if (!usePlayer.getState().expanded) {
+        usePlayer.getState().setExpanded(true);
+        await new Promise((listo) =>
+          requestAnimationFrame(() => requestAnimationFrame(listo)),
+        );
+      }
+      await contenedor.current?.requestFullscreen();
     } catch {
       /* el sistema puede negarlo; no hay nada que hacer */
     }
@@ -264,9 +272,21 @@ export function Player() {
       onTimeUpdate={(e) =>
         p.reportTime(e.currentTarget.currentTime, e.currentTarget.duration || 0)
       }
-      onLoadedMetadata={(e) =>
-        p.reportTime(e.currentTarget.currentTime, e.currentTarget.duration || 0)
-      }
+      onLoadedMetadata={(e) => {
+        const el = e.currentTarget;
+        const { position, playing } = usePlayer.getState();
+        // Red de seguridad: si el elemento se rehiciera por lo que sea, nacería
+        // en el segundo cero y en pausa aunque la reproducción fuera por la
+        // mitad. Se recoloca antes de informar, para no machacar la posición
+        // buena con el cero del elemento recién cargado.
+        if (position > 0.5 && Math.abs(el.currentTime - position) > 0.5) {
+          el.currentTime = position;
+        }
+        if (playing && el.paused) {
+          el.play().catch(() => usePlayer.setState({ playing: false }));
+        }
+        p.reportTime(el.currentTime, el.duration || 0);
+      }}
       onEnded={() => p.next(true)}
       onError={() => {
         toast(
@@ -447,12 +467,27 @@ export function Player() {
     </div>
   );
 
-  // ---- Vista ampliada, para vídeo ----
-  if (p.expanded && esVideo) {
-    return (
+  // Las dos vistas se montan siempre y solo se oculta la que no toca.
+  //
+  // Antes se devolvía un árbol u otro según `ampliado`, y eso destruía el
+  // elemento de vídeo cada vez que se cambiaba de vista: React encontraba tipos
+  // distintos en la misma posición y lo rehacía. El elemento nuevo nacía en el
+  // segundo cero y en pausa, y el efecto de play no volvía a dispararse porque
+  // ni `playing` ni `current` habían cambiado. Por eso pasar a «solo audio»
+  // paraba la reproducción en seco. Manteniéndolo en el árbol, cambiar de vista
+  // es solo un cambio de CSS y el sonido no se entera.
+  const ampliado = p.expanded && esVideo;
+
+  return (
+    <>
+      {/* ---- Vista ampliada, para vídeo ---- */}
       <div
         ref={contenedor}
-        className="fixed inset-0 z-40 flex flex-col bg-black/95 backdrop-blur"
+        className={
+          ampliado
+            ? "fixed inset-0 z-40 flex flex-col bg-black/95 backdrop-blur"
+            : "hidden"
+        }
       >
         <div className="flex items-center gap-3 px-5 py-3 text-white">
           <button
@@ -474,6 +509,7 @@ export function Player() {
           </button>
         </div>
 
+        {/* El vídeo vive aquí y solo aquí, ampliado o no. */}
         <div
           className="flex min-h-0 flex-1 items-center justify-center"
           onClick={p.toggle}
@@ -482,67 +518,77 @@ export function Player() {
         </div>
 
         <div className="flex flex-col gap-2 px-6 py-4">
-          {barraProgreso}
+          {ampliado && barraProgreso}
           <div className="flex items-center">
-            <div className="flex-1">{volumen}</div>
-            {controles}
+            <div className="flex-1">{ampliado && volumen}</div>
+            {ampliado && controles}
             <div className="flex flex-1 items-center justify-end gap-1">
-              {ajuste}
-              {selectorSubs}
-              {botonPantalla}
-              {modoAudio}
-              <Velocidad rate={p.rate} onChange={p.setRate} />
+              {ampliado && (
+                <>
+                  {ajuste}
+                  {selectorSubs}
+                  {botonPantalla}
+                  {modoAudio}
+                  <Velocidad rate={p.rate} onChange={p.setRate} />
+                </>
+              )}
             </div>
           </div>
         </div>
       </div>
-    );
-  }
 
-  // ---- Barra inferior ----
-  return (
-    <div className="flex items-center gap-4 border-t border-line bg-surface2/80 px-4 py-2.5 backdrop-blur">
-      {media}
+      {/* ---- Barra inferior ---- */}
+      <div
+        className={
+          ampliado
+            ? "hidden"
+            : "flex items-center gap-4 border-t border-line bg-surface2/80 px-4 py-2.5 backdrop-blur"
+        }
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface3">
+            {item.thumbnail ? (
+              <img src={item.thumbnail} alt="" className="h-full w-full object-cover" />
+            ) : esVideo ? (
+              <ListMusic size={16} className="text-muted" />
+            ) : (
+              <Music size={16} className="text-muted" />
+            )}
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-[12.5px] font-medium">{item.title}</p>
+            <p className="truncate text-[11px] text-muted">
+              {item.uploader ?? (esVideo ? "Vídeo" : "Música")}
+              {p.queue.length > 1 && ` · ${p.index + 1} de ${p.queue.length}`}
+            </p>
+          </div>
+        </div>
 
-      <div className="flex min-w-0 flex-1 items-center gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface3">
-          {item.thumbnail ? (
-            <img src={item.thumbnail} alt="" className="h-full w-full object-cover" />
-          ) : esVideo ? (
-            <ListMusic size={16} className="text-muted" />
-          ) : (
-            <Music size={16} className="text-muted" />
+        <div className="flex min-w-0 flex-[2] flex-col gap-1">
+          <div className="flex justify-center">{!ampliado && controles}</div>
+          {!ampliado && barraProgreso}
+        </div>
+
+        <div className="flex flex-1 items-center justify-end gap-2">
+          {!ampliado && (
+            <>
+              <Velocidad rate={p.rate} onChange={p.setRate} />
+              {volumen}
+              {selectorSubs}
+              {modoAudio}
+              {esVideo && !p.audioOnly && (
+                <Boton title="Ampliar" onClick={() => p.setExpanded(true)}>
+                  <Maximize2 size={15} />
+                </Boton>
+              )}
+              <Boton title="Cerrar el reproductor" onClick={p.stop}>
+                <X size={15} />
+              </Boton>
+            </>
           )}
         </div>
-        <div className="min-w-0">
-          <p className="truncate text-[12.5px] font-medium">{item.title}</p>
-          <p className="truncate text-[11px] text-muted">
-            {item.uploader ?? (esVideo ? "Vídeo" : "Música")}
-            {p.queue.length > 1 && ` · ${p.index + 1} de ${p.queue.length}`}
-          </p>
-        </div>
       </div>
-
-      <div className="flex min-w-0 flex-[2] flex-col gap-1">
-        <div className="flex justify-center">{controles}</div>
-        {barraProgreso}
-      </div>
-
-      <div className="flex flex-1 items-center justify-end gap-2">
-        <Velocidad rate={p.rate} onChange={p.setRate} />
-        {volumen}
-        {selectorSubs}
-        {modoAudio}
-        {esVideo && !p.audioOnly && (
-          <Boton title="Ampliar" onClick={() => p.setExpanded(true)}>
-            <Maximize2 size={15} />
-          </Boton>
-        )}
-        <Boton title="Cerrar el reproductor" onClick={p.stop}>
-          <X size={15} />
-        </Boton>
-      </div>
-    </div>
+    </>
   );
 }
 
