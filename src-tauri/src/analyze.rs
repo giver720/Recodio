@@ -821,8 +821,16 @@ pub fn clean_ytdlp_error(raw: &str) -> String {
         .lines()
         .rev()
         .find(|l| l.contains("ERROR:"))
+        // Los errores de uso vienen de argparse y no llevan «ERROR:», sino el
+        // nombre del ejecutable: «yt-dlp.exe: error: no such option: --x».
+        .or_else(|| raw.lines().rev().find(|l| l.contains(": error:")))
         .or_else(|| raw.lines().rev().find(|l| !l.trim().is_empty()))
         .unwrap_or(raw)
         .trim();
-    line.trim_start_matches("ERROR:").trim().to_string()
+    let line = line.trim_start_matches("ERROR:").trim();
+    // El «yt-dlp.exe: error:» de delante no le dice nada a quien lo lee.
+    match line.split_once(": error:") {
+        Some((_, motivo)) => motivo.trim().to_string(),
+        None => line.to_string(),
+    }
 }

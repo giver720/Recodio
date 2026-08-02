@@ -77,11 +77,14 @@ fn apply_extras_args(cmd: &mut tokio::process::Command, s: &Settings, kind: &str
             .arg("--convert-subs")
             .arg("vtt");
         if s.embed_subtitles {
-            // Sin `--keep-subs`, yt-dlp borra los archivos sueltos después de
-            // incrustarlos, y los incrustados en un MP4 el reproductor no puede
-            // leerlos. Se quedan los dos: uno para otros programas, otro para
-            // poder elegir idioma aquí.
-            cmd.arg("--embed-subs").arg("--keep-subs");
+            // Solo `--embed-subs`. Aquí hubo un `--keep-subs` que **no existe**
+            // en yt-dlp: hacía que rechazara la llamada entera con un error de
+            // uso, así que ningún vídeo se descargaba con los subtítulos
+            // activados. Y era innecesario: yt-dlp solo borra los archivos
+            // sueltos tras incrustarlos cuando no se le han pedido, y aquí
+            // siempre se le piden con `--write-subs`. Hacen falta los dos,
+            // porque los incrustados en un MP4 el reproductor no sabe leerlos.
+            cmd.arg("--embed-subs");
         }
     }
 
@@ -266,7 +269,7 @@ pub async fn download(
                 job.entry.title
             ));
         }
-        return Err(anyhow!("yt-dlp terminó con código {:?}", status.code()));
+        return Err(anyhow!(explicar_salida(status.code())));
     }
 
     final_path
@@ -320,11 +323,37 @@ fn handle_line(line: &str, on_progress: &mut impl FnMut(Progress), error_tail: &
         return;
     }
 
-    if line.contains("ERROR:") || line.starts_with("WARNING:") {
+    // Los errores de uso no llevan el «ERROR:» del resto: los imprime argparse
+    // en minúsculas y con el nombre del ejecutable delante, «yt-dlp.exe: error:
+    // no such option: --loquesea». Sin recogerlos, una llamada mal formada se
+    // quedaba sin explicación y lo único que llegaba a la interfaz era el
+    // código de salida pelado, que no dice nada.
+    if line.contains("ERROR:") || line.starts_with("WARNING:") || line.contains(": error:") {
         error_tail.push(line.to_string());
         if error_tail.len() > 20 {
             error_tail.remove(0);
         }
+    }
+}
+
+/// Traduce el código de salida de yt-dlp a algo con lo que hacer algo.
+///
+/// Es el último recurso, solo para cuando yt-dlp no ha dejado ni una línea
+/// aprovechable. Aun así, un número suelto no ayuda a nadie.
+fn explicar_salida(codigo: Option<i32>) -> String {
+    match codigo {
+        Some(2) => "yt-dlp rechazó las opciones con las que se le llamó. Suele ser un \
+                    ajuste con un valor que no admite: revisa en Ajustes el límite de \
+                    velocidad, el navegador del que se toman las cookies y el formato \
+                    de audio."
+            .to_string(),
+        Some(100) => "yt-dlp necesita actualizarse para poder continuar. Tienes el botón \
+                      en Ajustes › Herramientas."
+            .to_string(),
+        Some(c) => format!("yt-dlp terminó con el código {c} sin explicar el motivo."),
+        None => "yt-dlp se cerró de golpe, sin llegar a devolver un código. Puede haberlo \
+                 parado el sistema o un antivirus."
+            .to_string(),
     }
 }
 
@@ -383,6 +412,59 @@ mod tests {
     fn nunca_devuelve_una_busqueda_vacia() {
         assert_eq!(search_query("(Instrumental)"), "(Instrumental)");
         assert_eq!(search_query(""), "");
+    }
+
+    /// Lo que destapó todo esto: una bandera inexistente hacía fallar la
+    /// descarga y el usuario solo veía «terminó con código Some(2)», porque el
+    /// motivo real no se recogía. Los errores de uso los imprime argparse en
+    /// minúsculas, sin el «ERROR:» que llevan los demás.
+    #[test]
+    fn recoge_los_errores_de_uso_de_yt_dlp() {
+        let mut recogido = Vec::new();
+        let mut sin_progreso = |_: Progress| {};
+        for linea in [
+            "Usage: yt-dlp.exe [OPTIONS] URL [URL...]",
+            "yt-dlp.exe: error: no such option: --keep-subs",
+        ] {
+            handle_line(linea, &mut sin_progreso, &mut recogido);
+        }
+
+        assert_eq!(recogido.len(), 1, "la línea de uso es ruido: {recogido:?}");
+        assert!(recogido[0].contains("no such option"));
+        assert_eq!(
+            crate::analyze::clean_ytdlp_error(&recogido.join("\n")),
+            "no such option: --keep-subs",
+            "al usuario le sobra el nombre del ejecutable"
+        );
+    }
+
+    #[test]
+    fn sigue_recogiendo_los_errores_normales() {
+        let mut recogido = Vec::new();
+        let mut sin_progreso = |_: Progress| {};
+        handle_line("[download] 50%", &mut sin_progreso, &mut recogido);
+        handle_line("ERROR: Video unavailable", &mut sin_progreso, &mut recogido);
+        handle_line("WARNING: algo menor", &mut sin_progreso, &mut recogido);
+
+        assert_eq!(recogido.len(), 2);
+        assert_eq!(
+            crate::analyze::clean_ytdlp_error(&recogido.join("\n")),
+            "Video unavailable"
+        );
+    }
+
+    /// Un número suelto no es un mensaje de error. El 2 es el caso real que
+    /// motivó esto, y el 100 el que se arregla actualizando.
+    #[test]
+    fn el_codigo_de_salida_se_explica_en_castellano() {
+        assert!(explicar_salida(Some(2)).contains("rechazó las opciones"));
+        assert!(explicar_salida(Some(100)).contains("actualizarse"));
+        assert!(explicar_salida(Some(7)).contains("código 7"));
+        assert!(explicar_salida(None).contains("de golpe"));
+        // Y en ninguno se escapa el Option de Rust.
+        for c in [Some(2), Some(100), Some(7), None] {
+            assert!(!explicar_salida(c).contains("Some("), "se filtró el Option con {c:?}");
+        }
     }
 }
 
