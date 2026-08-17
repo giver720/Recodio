@@ -1,6 +1,8 @@
 import {
   AlertTriangle,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Copy,
   Disc3,
@@ -32,6 +34,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent,
   type ReactNode,
@@ -446,11 +449,8 @@ export function Library() {
     setFijadas((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]));
   }
 
-  /** Deja la playlist arrastrada en el sitio de `destino`. */
-  function soltarSobre(destino: string) {
-    const origen = arrastrada;
-    setArrastrada(null);
-    setEncima(null);
+  /** Deja `origen` en el sitio que ocupa `destino`. */
+  function colocar(origen: string, destino: string) {
     if (!origen || origen === destino) return;
 
     const mover = (ids: string[]) => {
@@ -482,6 +482,65 @@ export function Library() {
     // arrastre no sirviera de nada.
     setPlSort("manual");
   }
+
+  /** Sube (-1) o baja (+1) una playlist un puesto en la lista que se ve. */
+  function moverUno(id: string, salto: number) {
+    const i = playlistsVisibles.findIndex((p) => p.id === id);
+    const vecina = playlistsVisibles[i + salto];
+    if (i < 0 || !vecina) return;
+    colocar(id, vecina.id);
+  }
+
+  // El arrastre va con eventos de ratón, no con el de HTML.
+  //
+  // En Windows la ventana tiene activado el drag and drop del sistema (para
+  // soltar archivos encima), y eso se come los eventos `drag*` de la página: el
+  // arrastre se veía arrancar y no pasaba nada. Con `pointer*` no hay quien se
+  // interponga, y de paso funciona igual con ratón, lápiz o dedo.
+  const arrastre = useRef<{ id: string; y: number; activo: boolean } | null>(null);
+  const destino = useRef<string | null>(null);
+  const acabaDeArrastrar = useRef(false);
+  const colocarRef = useRef(colocar);
+  colocarRef.current = colocar;
+
+  useEffect(() => {
+    function alMover(e: PointerEvent) {
+      const a = arrastre.current;
+      if (!a) return;
+      // Un temblor de mano al hacer clic no es un arrastre.
+      if (!a.activo) {
+        if (Math.abs(e.clientY - a.y) < 5) return;
+        a.activo = true;
+        setArrastrada(a.id);
+      }
+      const bajoElRaton = document.elementFromPoint(e.clientX, e.clientY);
+      const fila = bajoElRaton?.closest("[data-playlist]") ?? null;
+      const id = fila?.getAttribute("data-playlist") ?? null;
+      destino.current = id && id !== a.id ? id : null;
+      setEncima(destino.current);
+    }
+
+    function alSoltar() {
+      const a = arrastre.current;
+      arrastre.current = null;
+      setArrastrada(null);
+      setEncima(null);
+      if (!a?.activo) return;
+      // El clic que cierra el arrastre no debe además abrir la playlist.
+      acabaDeArrastrar.current = true;
+      if (destino.current) colocarRef.current(a.id, destino.current);
+      destino.current = null;
+    }
+
+    window.addEventListener("pointermove", alMover);
+    window.addEventListener("pointerup", alSoltar);
+    window.addEventListener("pointercancel", alSoltar);
+    return () => {
+      window.removeEventListener("pointermove", alMover);
+      window.removeEventListener("pointerup", alSoltar);
+      window.removeEventListener("pointercancel", alSoltar);
+    };
+  }, []);
 
   const delBucket = useMemo(() => {
     const ahora = Date.now() / 1000;
@@ -804,31 +863,26 @@ export function Library() {
         {playlistsVisibles.map((p) => (
           <div
             key={p.id}
-            draggable
-            onDragStart={(e) => {
-              setArrastrada(p.id);
-              e.dataTransfer.effectAllowed = "move";
-              // Firefox no arranca el arrastre sin datos puestos.
-              e.dataTransfer.setData("text/plain", p.id);
+            data-playlist={p.id}
+            onPointerDown={(e) => {
+              // Empieza un gesto nuevo: lo que pasara en el anterior ya no
+              // cuenta. Sin esto, el arrastre dejaba anulado el clic siguiente y
+              // las flechas de orden no respondían la primera vez.
+              acabaDeArrastrar.current = false;
+              // Botón izquierdo, y no encima de las flechas de orden.
+              if (e.button !== 0) return;
+              if ((e.target as HTMLElement).closest("[data-orden]")) return;
+              arrastre.current = { id: p.id, y: e.clientY, activo: false };
             }}
-            onDragOver={(e) => {
-              if (!arrastrada || arrastrada === p.id) return;
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-              setEncima(p.id);
+            onClickCapture={(e) => {
+              // El clic con el que termina un arrastre no debe abrir la playlist
+              // sobre la que se soltó.
+              if (acabaDeArrastrar.current) e.stopPropagation();
             }}
-            onDragLeave={() => setEncima((v) => (v === p.id ? null : v))}
-            onDrop={(e) => {
-              e.preventDefault();
-              soltarSobre(p.id);
-            }}
-            onDragEnd={() => {
-              setArrastrada(null);
-              setEncima(null);
-            }}
-            className={`rounded-xl transition ${arrastrada === p.id ? "opacity-40" : ""} ${
-              encima === p.id ? "ring-1 ring-accent/70" : ""
-            }`}
+            style={{ touchAction: "none" }}
+            className={`group/pl relative select-none rounded-xl transition ${
+              arrastrada === p.id ? "opacity-40" : ""
+            } ${encima === p.id ? "ring-1 ring-accent/70" : ""}`}
           >
           <BucketButton
             active={bucket === p.id}
@@ -903,6 +957,28 @@ export function Library() {
               ])
             }
           />
+
+            {/* Para quien prefiera no arrastrar, o para un ajuste fino. */}
+            <span className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-lg bg-surface3/95 px-0.5 py-0.5 shadow group-hover/pl:flex">
+              <button
+                type="button"
+                data-orden="subir"
+                title="Subir un puesto"
+                onClick={() => moverUno(p.id, -1)}
+                className="rc-ring rounded-md p-0.5 text-muted transition hover:text-ink"
+              >
+                <ChevronUp size={13} />
+              </button>
+              <button
+                type="button"
+                data-orden="bajar"
+                title="Bajar un puesto"
+                onClick={() => moverUno(p.id, 1)}
+                className="rc-ring rounded-md p-0.5 text-muted transition hover:text-ink"
+              >
+                <ChevronDown size={13} />
+              </button>
+            </span>
           </div>
         ))}
 
