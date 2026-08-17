@@ -14,9 +14,12 @@ import {
   Library as LibraryIcon,
   ListMusic,
   Music,
+  Pin,
+  PinOff,
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Rows3,
   Search,
   Trash2,
@@ -62,6 +65,15 @@ const ORDENES: { value: Sort; label: string }[] = [
   { value: "size", label: "Tamaño" },
 ];
 
+type PlSort = "recent" | "title" | "count" | "manual";
+
+const ORDENES_PL: { value: PlSort; label: string }[] = [
+  { value: "recent", label: "Añadidas antes" },
+  { value: "title", label: "Por título" },
+  { value: "count", label: "Más canciones" },
+  { value: "manual", label: "A mi manera" },
+];
+
 const AGRUPACIONES: { value: Group; label: string }[] = [
   { value: "none", label: "Sin agrupar" },
   { value: "artist", label: "Por artista" },
@@ -80,6 +92,35 @@ function usePreferencia<T extends string>(clave: string, inicial: T) {
 }
 
 const SIN_ARTISTA = "Sin artista";
+
+/** Prefijo de las secciones que son una carpeta de archivos sueltos. */
+const CARPETA = "loose:";
+
+/**
+ * Cuándo se rastreó por última vez sin que nadie lo pidiera.
+ *
+ * Vive fuera del componente porque la biblioteca se monta y se desmonta cada vez
+ * que se cambia de pestaña, y rastrear en cada visita sería releer el disco
+ * entero por ir y volver.
+ */
+let ultimoRastreoAuto = 0;
+const ESPERA_RASTREO = 2 * 60 * 1000;
+
+/** Lista de identificadores guardada entre sesiones (fijadas, orden a mano). */
+function useListaGuardada(clave: string) {
+  const [lista, setLista] = useState<string[]>(() => {
+    try {
+      const crudo = JSON.parse(localStorage.getItem(clave) ?? "[]");
+      return Array.isArray(crudo) ? crudo.filter((x) => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem(clave, JSON.stringify(lista));
+  }, [clave, lista]);
+  return [lista, setLista] as const;
+}
 
 export function Library() {
   const libraryVersion = useStore((s) => s.libraryVersion);
@@ -103,11 +144,24 @@ export function Library() {
   const [scanning, setScanning] = useState<{ done: number; total: number } | null>(null);
   const [sugerencias, setSugerencias] = useState<string[]>([]);
   const [cerrados, setCerrados] = useState<Set<string>>(new Set());
+  // Al buscar se busca en todo, no solo en lo que haya abierto: quien escribe
+  // algo quiere encontrarlo, no que le digan que ahí no está.
+  const [soloSeccion, setSoloSeccion] = useState(false);
+  const [formato, setFormato] = useState("todos");
+  const [carpetasAbiertas, setCarpetasAbiertas] = useState(false);
   const [refreshing, setRefreshing] = useState<{
     phase: RefreshPhase;
     done: number;
     total: number;
   } | null>(null);
+
+  // ---- barra lateral: playlists ----
+  const [busquedaPl, setBusquedaPl] = useState("");
+  const [plSort, setPlSort] = usePreferencia<PlSort>("rc.lib.plSort", "recent");
+  const [fijadas, setFijadas] = useListaGuardada("rc.lib.plPinned");
+  const [ordenManual, setOrdenManual] = useListaGuardada("rc.lib.plOrder");
+  const [arrastrada, setArrastrada] = useState<string | null>(null);
+  const [encima, setEncima] = useState<string | null>(null);
 
   const [sort, setSort] = usePreferencia<Sort>("rc.lib.sort", "recent");
   const [group, setGroup] = usePreferencia<Group>("rc.lib.group", "none");
@@ -150,6 +204,29 @@ export function Library() {
   useEffect(() => {
     api.suggestedFolders().then(setSugerencias).catch(() => setSugerencias([]));
   }, []);
+
+  // Rastreo al abrir la biblioteca: un mp3 copiado a mano aparece sin que haya
+  // que saber que existe un botón para ello. Va callado y sin barra de progreso;
+  // solo se nota si encuentra algo.
+  useEffect(() => {
+    if (Date.now() - ultimoRastreoAuto < ESPERA_RASTREO) return;
+    ultimoRastreoAuto = Date.now();
+    api
+      .libraryScanQuiet()
+      .then((r) => {
+        if (r.added === 0) return;
+        toast(
+          "info",
+          r.added === 1
+            ? "1 archivo nuevo encontrado en tus carpetas"
+            : `${r.added} archivos nuevos encontrados en tus carpetas`,
+        );
+        useStore.setState((s) => ({ libraryVersion: s.libraryVersion + 1 }));
+      })
+      .catch(() => {
+        /* si el rastreo falla, la biblioteca sigue sirviendo igual */
+      });
+  }, [toast]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -305,8 +382,113 @@ export function Library() {
     };
   }, [items]);
 
+  // Las playlists se ven una a una con su carpeta; lo suelto, en cambio, cae
+  // todo en el mismo saco aunque venga de sitios distintos. Aquí se recuperan
+  // sus carpetas para poder navegarlas igual.
+  const carpetasSueltas = useMemo(() => {
+    const mapa = new Map<string, number>();
+    for (const i of items) {
+      if (i.playlistId) continue;
+      const carpeta = folderOf(i.filePath);
+      mapa.set(carpeta, (mapa.get(carpeta) ?? 0) + 1);
+    }
+    return [...mapa.entries()]
+      .map(([ruta, cuenta]) => ({ ruta, cuenta }))
+      .sort((a, b) => b.cuenta - a.cuenta || a.ruta.localeCompare(b.ruta, "es"));
+  }, [items]);
+
+  // Las fijadas van arriba, en el orden en que se fijaron; el resto, por lo que
+  // se haya elegido. El orden a mano se guarda por identificador, así que
+  // aguanta que aparezcan playlists nuevas o se borren otras.
+  const ordenarPlaylists = useCallback(
+    (lista: Playlist[]) => {
+      const posicion = new Map(ordenManual.map((id, i) => [id, i]));
+      const ultimo = Number.MAX_SAFE_INTEGER;
+      const ordenadas = [...lista].sort((a, b) => {
+        switch (plSort) {
+          case "title":
+            return a.title.localeCompare(b.title, "es");
+          case "count":
+            return b.itemCount - a.itemCount;
+          case "manual":
+            return (
+              (posicion.get(a.id) ?? ultimo) - (posicion.get(b.id) ?? ultimo) ||
+              b.createdAt - a.createdAt
+            );
+          default:
+            return b.createdAt - a.createdAt;
+        }
+      });
+      // Segunda pasada en vez de meterlo en la comparación: `sort` es estable,
+      // así que subir las fijadas no deshace el orden que acaba de aplicarse.
+      const rango = (id: string) => {
+        const i = fijadas.indexOf(id);
+        return i === -1 ? ultimo : i;
+      };
+      return ordenadas.sort((a, b) => rango(a.id) - rango(b.id));
+    },
+    [plSort, ordenManual, fijadas],
+  );
+
+  const playlistsVisibles = useMemo(() => {
+    const q = busquedaPl.trim().toLowerCase();
+    const filtradas = q
+      ? playlists.filter(
+          (p) =>
+            p.title.toLowerCase().includes(q) ||
+            (p.uploader ?? "").toLowerCase().includes(q),
+        )
+      : playlists;
+    return ordenarPlaylists(filtradas);
+  }, [playlists, busquedaPl, ordenarPlaylists]);
+
+  function fijar(id: string) {
+    setFijadas((f) => (f.includes(id) ? f.filter((x) => x !== id) : [...f, id]));
+  }
+
+  /** Deja la playlist arrastrada en el sitio de `destino`. */
+  function soltarSobre(destino: string) {
+    const origen = arrastrada;
+    setArrastrada(null);
+    setEncima(null);
+    if (!origen || origen === destino) return;
+
+    const mover = (ids: string[]) => {
+      const copia = [...ids];
+      const desde = copia.indexOf(origen);
+      if (desde < 0) return ids;
+      const [movida] = copia.splice(desde, 1);
+      const hasta = copia.indexOf(destino);
+      if (hasta < 0) return ids;
+      // Soltando hacia abajo se coloca detrás; hacia arriba, delante. Es lo que
+      // se espera al ver dónde queda el hueco mientras se arrastra.
+      copia.splice(desde <= hasta ? hasta + 1 : hasta, 0, movida);
+      return copia;
+    };
+
+    // Entre fijadas manda el orden de fijado, así que reordenarlas es reordenar
+    // esa lista; si no, la playlist volvería a su sitio nada más soltarla.
+    if (fijadas.includes(origen) && fijadas.includes(destino)) {
+      setFijadas(mover(fijadas));
+      return;
+    }
+    // Sacar una fijada al montón de abajo es dejar de fijarla: quedarse fijada
+    // la devolvería arriba en el acto.
+    if (fijadas.includes(origen)) {
+      setFijadas((f) => f.filter((x) => x !== origen));
+    }
+    setOrdenManual(mover(ordenarPlaylists(playlists).map((p) => p.id)));
+    // Arrastrar es decir «este es mi orden»; mantener el anterior haría que el
+    // arrastre no sirviera de nada.
+    setPlSort("manual");
+  }
+
   const delBucket = useMemo(() => {
     const ahora = Date.now() / 1000;
+    if (bucket.startsWith(CARPETA)) {
+      const carpeta = bucket.slice(CARPETA.length);
+      return items.filter((i) => !i.playlistId && folderOf(i.filePath) === carpeta);
+    }
     switch (bucket) {
       case "all":
         return items;
@@ -323,20 +505,48 @@ export function Library() {
     }
   }, [items, bucket]);
 
+  /** Extensiones que hay de verdad, para no ofrecer filtros vacíos. */
+  const formatos = useMemo(() => {
+    const mapa = new Map<string, number>();
+    for (const i of items) mapa.set(i.ext, (mapa.get(i.ext) ?? 0) + 1);
+    return [
+      { value: "todos", label: "Cualquier formato" },
+      ...[...mapa.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([ext, n]) => ({ value: ext, label: `${ext.toUpperCase()} (${n})` })),
+    ];
+  }, [items]);
+
+  // Un formato que deja de existir (se borró lo último que quedaba de él) no
+  // puede quedarse filtrando en silencio una lista vacía.
+  useEffect(() => {
+    if (formato !== "todos" && !formatos.some((f) => f.value === formato)) {
+      setFormato("todos");
+    }
+  }, [formatos, formato]);
+
+  const buscando = search.trim().length > 0;
+  const global = buscando && !soloSeccion;
+
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const filtrados = q
-      ? delBucket.filter(
+    // Buscar mira toda la biblioteca aunque estés dentro de una playlist. Antes
+    // solo se buscaba en la sección abierta, y desde una lista de 20 canciones
+    // parecía que el resto no existiera.
+    const base = q && !soloSeccion ? items : delBucket;
+    let filtrados = q
+      ? base.filter(
           (i) =>
             i.title.toLowerCase().includes(q) ||
             (i.uploader ?? "").toLowerCase().includes(q) ||
             i.filePath.toLowerCase().includes(q),
         )
-      : delBucket;
+      : base;
+    if (formato !== "todos") filtrados = filtrados.filter((i) => i.ext === formato);
 
     // Dentro de una playlist el orden que importa es el suyo, salvo que se pida
     // otro: es la lista tal y como la hizo quien la hizo.
-    const esPlaylist = !["all", "audio", "video", "loose", "recent"].includes(bucket);
+    const esPlaylist = !q && playlists.some((p) => p.id === bucket);
     const orden = [...filtrados];
     if (esPlaylist && sort === "recent") {
       orden.sort((a, b) => (a.playlistIndex ?? 0) - (b.playlistIndex ?? 0));
@@ -364,7 +574,7 @@ export function Library() {
       }
     });
     return orden;
-  }, [delBucket, search, sort, bucket]);
+  }, [delBucket, items, playlists, search, soloSeccion, formato, sort, bucket]);
 
   const grupos = useMemo(() => {
     if (group === "none") return null;
@@ -467,14 +677,61 @@ export function Library() {
           label="Vídeos"
           count={conteos.video}
         />
-        <BucketButton
-          active={bucket === "loose"}
-          onClick={() => setBucket("loose")}
-          icon={<Disc3 size={15} />}
-          label="Sueltos"
-          count={conteos.loose}
-          title="Archivos que no pertenecen a ninguna playlist"
-        />
+        <div className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <BucketButton
+              active={bucket === "loose"}
+              onClick={() => setBucket("loose")}
+              icon={<Disc3 size={15} />}
+              label="Sueltos"
+              count={conteos.loose}
+              title="Archivos que no pertenecen a ninguna playlist"
+            />
+          </div>
+          {carpetasSueltas.length > 1 && (
+            <button
+              type="button"
+              title={
+                carpetasAbiertas
+                  ? "Ocultar las carpetas"
+                  : `Ver las ${carpetasSueltas.length} carpetas donde están`
+              }
+              aria-expanded={carpetasAbiertas}
+              onClick={() => setCarpetasAbiertas((v) => !v)}
+              className="rc-ring shrink-0 rounded-md p-1 text-muted transition hover:bg-surface2 hover:text-ink"
+            >
+              <ChevronRight
+                size={14}
+                className={`transition-transform ${carpetasAbiertas ? "rotate-90" : ""}`}
+              />
+            </button>
+          )}
+        </div>
+
+        {/* Las carpetas de lo suelto, para poder navegarlas como las playlists. */}
+        {carpetasAbiertas &&
+          carpetasSueltas.map((c) => (
+            <button
+              key={c.ruta}
+              type="button"
+              onClick={() => setBucket(CARPETA + c.ruta)}
+              title={c.ruta}
+              className={`rc-ring ml-3 flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-[12.5px] transition
+                ${
+                  bucket === CARPETA + c.ruta
+                    ? "bg-accent/12 text-ink"
+                    : "text-muted hover:bg-surface2 hover:text-ink"
+                }`}
+            >
+              <Folder
+                size={13}
+                className={`shrink-0 ${bucket === CARPETA + c.ruta ? "text-accent2" : ""}`}
+              />
+              <span className="min-w-0 flex-1 truncate">{folderName(c.ruta)}</span>
+              <span className="shrink-0 text-[10.5px] tabular-nums">{c.cuenta}</span>
+            </button>
+          ))}
+
         <BucketButton
           active={bucket === "recent"}
           onClick={() => setBucket("recent")}
@@ -485,18 +742,111 @@ export function Library() {
         />
 
         {playlists.length > 0 && (
-          <Titulo>Playlists</Titulo>
+          <>
+            <div className="mt-4 flex items-center justify-between gap-1 px-2 pb-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                Playlists
+              </span>
+              <span className="text-[10.5px] tabular-nums text-muted/70">
+                {playlistsVisibles.length}
+                {busquedaPl.trim() && ` de ${playlists.length}`}
+              </span>
+            </div>
+
+            {/* Con cuarenta playlists, encontrarla a ojo deja de funcionar. */}
+            {playlists.length > 6 && (
+              <div className="mb-1 flex items-center gap-1.5 rounded-xl border border-line bg-surface2/60 px-2 py-1">
+                <Search size={13} className="shrink-0 text-muted" />
+                <input
+                  value={busquedaPl}
+                  onChange={(e) => setBusquedaPl(e.target.value)}
+                  placeholder="Filtrar playlists…"
+                  aria-label="Filtrar playlists"
+                  className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted/70"
+                />
+                {busquedaPl && (
+                  <button
+                    type="button"
+                    title="Quitar el filtro"
+                    onClick={() => setBusquedaPl("")}
+                    className="rc-ring shrink-0 rounded-md p-0.5 text-muted transition hover:text-ink"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="mb-1 flex items-center gap-1 px-0.5">
+              <SelectorMini
+                value={plSort}
+                onChange={(v) => setPlSort(v as PlSort)}
+                options={ORDENES_PL}
+                title="Ordenar las playlists. Arrástralas para ponerlas a tu gusto."
+              />
+              {plSort === "manual" && ordenManual.length > 0 && (
+                <button
+                  type="button"
+                  title="Olvidar el orden que hiciste arrastrando"
+                  onClick={() => {
+                    setOrdenManual([]);
+                    setPlSort("recent");
+                  }}
+                  className="rc-ring rounded-md p-1 text-muted transition hover:bg-surface2 hover:text-ink"
+                >
+                  <RotateCcw size={13} />
+                </button>
+              )}
+            </div>
+          </>
         )}
-        {playlists.map((p) => (
-          <BucketButton
+
+        {playlistsVisibles.map((p) => (
+          <div
             key={p.id}
+            draggable
+            onDragStart={(e) => {
+              setArrastrada(p.id);
+              e.dataTransfer.effectAllowed = "move";
+              // Firefox no arranca el arrastre sin datos puestos.
+              e.dataTransfer.setData("text/plain", p.id);
+            }}
+            onDragOver={(e) => {
+              if (!arrastrada || arrastrada === p.id) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              setEncima(p.id);
+            }}
+            onDragLeave={() => setEncima((v) => (v === p.id ? null : v))}
+            onDrop={(e) => {
+              e.preventDefault();
+              soltarSobre(p.id);
+            }}
+            onDragEnd={() => {
+              setArrastrada(null);
+              setEncima(null);
+            }}
+            className={`rounded-xl transition ${arrastrada === p.id ? "opacity-40" : ""} ${
+              encima === p.id ? "ring-1 ring-accent/70" : ""
+            }`}
+          >
+          <BucketButton
             active={bucket === p.id}
             onClick={() => setBucket(p.id)}
-            icon={<ListMusic size={15} />}
+            icon={
+              fijadas.includes(p.id) ? <Pin size={14} /> : <ListMusic size={15} />
+            }
             label={p.title}
             count={p.itemCount}
+            title={`${p.title}\n\nArrástrala para cambiarla de sitio. Clic derecho para fijarla arriba.`}
             onContextMenu={(e) =>
               openMenu(e, [
+                {
+                  label: fijadas.includes(p.id) ? "Dejar de fijar" : "Fijar arriba",
+                  icon: fijadas.includes(p.id) ? <PinOff size={14} /> : <Pin size={14} />,
+                  onClick: () => fijar(p.id),
+                },
+                { separator: true, label: "" },
                 ...(p.source === "local"
                   ? [
                       {
@@ -553,7 +903,14 @@ export function Library() {
               ])
             }
           />
+          </div>
         ))}
+
+        {busquedaPl.trim() && playlistsVisibles.length === 0 && (
+          <p className="px-2 py-1 text-[11.5px] text-muted/75">
+            Ninguna playlist se llama así.
+          </p>
+        )}
 
         {/* ---- Carpetas vigiladas ---- */}
         <div className="mt-4 flex items-center justify-between gap-1 px-2 pb-1">
@@ -658,6 +1015,12 @@ export function Library() {
           </div>
 
           <SelectorMini
+            value={formato}
+            onChange={setFormato}
+            options={formatos}
+            title="Filtrar por formato de archivo"
+          />
+          <SelectorMini
             value={group}
             onChange={(v) => setGroup(v as Group)}
             options={AGRUPACIONES}
@@ -743,14 +1106,28 @@ export function Library() {
               · {grupos.length} {group === "artist" ? "artistas" : "carpetas"}
             </span>
           )}
-          {search && shown.length !== delBucket.length && (
-            <button
-              type="button"
-              onClick={() => setSearch("")}
-              className="rc-ring ml-auto rounded-md px-1.5 py-0.5 transition hover:bg-surface2 hover:text-ink"
-            >
-              Quitar el filtro
-            </button>
+          {buscando && (
+            <span className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSoloSeccion((v) => !v)}
+                title={
+                  global
+                    ? "Buscar solo dentro de la sección abierta"
+                    : "Buscar en toda la biblioteca"
+                }
+                className="rc-ring rounded-md px-1.5 py-0.5 transition hover:bg-surface2 hover:text-ink"
+              >
+                {global ? "En toda la biblioteca" : "Solo en esta sección"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="rc-ring rounded-md px-1.5 py-0.5 transition hover:bg-surface2 hover:text-ink"
+              >
+                Quitar el filtro
+              </button>
+            </span>
           )}
         </div>
 
@@ -850,7 +1227,8 @@ export function Library() {
           ) : shown.length === 0 ? (
             <Vacio
               hayBiblioteca={items.length > 0}
-              buscando={search.trim().length > 0}
+              buscando={buscando}
+              filtrandoFormato={formato !== "todos"}
               bucket={bucket}
               onScan={() => scan()}
             />
@@ -1056,20 +1434,26 @@ function Cuadricula({ items, cola, play, openMenu, menuDe }: ListaProps) {
 function Vacio({
   hayBiblioteca,
   buscando,
+  filtrandoFormato,
   bucket,
   onScan,
 }: {
   hayBiblioteca: boolean;
   buscando: boolean;
+  filtrandoFormato: boolean;
   bucket: string;
   onScan: () => void;
 }) {
-  if (buscando) {
+  if (buscando || filtrandoFormato) {
     return (
       <EmptyState
         icon={<Search size={22} />}
         title="Sin resultados"
-        body="No hay nada que coincida con lo que has escrito. Prueba con menos palabras o mira en «Todo»."
+        body={
+          filtrandoFormato
+            ? "Nada que coincida con ese formato. Prueba con «Cualquier formato»."
+            : "No hay nada que coincida con lo que has escrito, ni siquiera en el resto de la biblioteca. Prueba con menos palabras."
+        }
       />
     );
   }
@@ -1115,13 +1499,6 @@ function Aviso({ icono, children }: { icono: ReactNode; children: ReactNode }) {
   );
 }
 
-function Titulo({ children }: { children: ReactNode }) {
-  return (
-    <p className="mt-4 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">
-      {children}
-    </p>
-  );
-}
 
 function SelectorMini({
   value,

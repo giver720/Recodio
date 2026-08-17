@@ -79,6 +79,19 @@ export const useStore = create<State>((set, get) => ({
       set((s) => ({ libraryVersion: s.libraryVersion + 1 })),
     );
 
+    // El rastreo de arranque va callado salvo cuando encuentra algo: enterarse
+    // de que han entrado archivos nuevos importa, y quedarse mudo haría dudar de
+    // si la biblioteca está completa.
+    listen<number>("library-scanned", (e) => {
+      const n = e.payload;
+      get().toast(
+        "info",
+        n === 1
+          ? "1 archivo nuevo encontrado en tus carpetas"
+          : `${n} archivos nuevos encontrados en tus carpetas`,
+      );
+    });
+
     listen<string>("playlist-ready", (e) => {
       const name = e.payload.split(/[\\/]/).pop() ?? e.payload;
       get().toast("success", `Playlist creada: ${name}`);

@@ -77,6 +77,8 @@ export const api = {
   /** Sin `paths` rastrea las carpetas de descarga más las vigiladas. */
   libraryScan: (paths?: string[]) =>
     invoke<ScanReport>("library_scan", { paths: paths ?? null }),
+  /** Rastreo sin barra de progreso, para el que hace la biblioteca al abrirse. */
+  libraryScanQuiet: () => invoke<ScanReport>("library_scan_quiet"),
   suggestedFolders: () => invoke<string[]>("suggested_folders"),
   exportM3u: (playlistId: string) =>
     invoke<string>("export_m3u", { playlistId }),

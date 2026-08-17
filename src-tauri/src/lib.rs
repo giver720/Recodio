@@ -340,9 +340,65 @@ async fn library_scan(
     };
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _guardia = GuardiaRastreo::tomar();
         local::scan_loose(&core.db, &core.bins, &raices, |hechos, total| {
             let _ = app.emit("scan-progress", (hechos, total));
         })
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+/// Solo puede haber un rastreo a la vez.
+///
+/// Hay tres cosas que lo lanzan —el arranque, abrir la biblioteca y el botón—,
+/// y dos a la vez leerían el disco por duplicado para acabar insertando lo
+/// mismo. El que llega segundo se va de vacío en lugar de esperar: lo que
+/// buscaba ya lo está metiendo el primero.
+static RASTREANDO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct GuardiaRastreo;
+
+impl GuardiaRastreo {
+    /// `None` si ya hay otro rastreo en marcha.
+    fn intentar() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        RASTREANDO
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
+    }
+
+    /// Para el rastreo que pide el usuario a mano, que sí espera resultados.
+    fn tomar() -> Self {
+        use std::sync::atomic::Ordering;
+        RASTREANDO.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for GuardiaRastreo {
+    fn drop(&mut self) {
+        RASTREANDO.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Rastrea sin avisar de nada: ni barra de progreso ni ruido.
+///
+/// Lo llama la biblioteca al abrirse. Antes había que acordarse de pulsar
+/// «Rastrear ahora» para que apareciera un mp3 copiado a mano, y quien no lo
+/// sabía daba la biblioteca por incompleta.
+#[tauri::command]
+async fn library_scan_quiet(state: State<'_, AppState>) -> CmdResult<local::ScanReport> {
+    let core = state.core.clone();
+    let raices = core.settings.read().unwrap().scan_roots();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(_guardia) = GuardiaRastreo::intentar() else {
+            return Ok(local::ScanReport::default());
+        };
+        local::scan_loose(&core.db, &core.bins, &raices, |_, _| {})
     })
     .await
     .map_err(err)?
@@ -719,6 +775,27 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let core = Arc::new(Core::new(data_dir, config_dir)?);
             let queue = Queue::new(core.clone(), app.handle().clone());
+
+            // Rastreo de arranque: lo que haya aparecido en las carpetas desde
+            // la última vez entra solo. Va en un hilo aparte para no retrasar la
+            // ventana, y solo avisa si de verdad ha encontrado algo.
+            let nucleo = core.clone();
+            let manejador = app.handle().clone();
+            std::thread::spawn(move || {
+                use tauri::Emitter;
+                let Some(_guardia) = GuardiaRastreo::intentar() else {
+                    return;
+                };
+                let raices = nucleo.settings.read().unwrap().scan_roots();
+                if let Ok(informe) = local::scan_loose(&nucleo.db, &nucleo.bins, &raices, |_, _| {})
+                {
+                    if informe.added > 0 {
+                        let _ = manejador.emit("library-scanned", informe.added);
+                        let _ = manejador.emit("library-changed", ());
+                    }
+                }
+            });
+
             app.manage(AppState { core, queue });
             Ok(())
         })
@@ -746,6 +823,7 @@ pub fn run() {
             subtitles_for,
             library_import_folder,
             library_scan,
+            library_scan_quiet,
             suggested_folders,
             export_m3u,
             play_file,
