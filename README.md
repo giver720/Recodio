@@ -31,6 +31,10 @@ duplicados y una biblioteca local desde la que abrir los archivos.
   copiar a otro equipo sin romper nada. No hay que exportar nada a mano.
 - **Biblioteca** por playlist / vídeos / música, con búsqueda y reproducción en
   el reproductor externo que elijas.
+- **Reproductor interno con ventana flotante**: el vídeo puede salirse a una
+  ventana aparte, redimensionable y encima del resto de aplicaciones, mientras
+  sigues usando Recodio o cualquier otra cosa. La cola, los subtítulos y los
+  controles siguen mandándose desde la ventana principal.
 
 ## Requisitos
 

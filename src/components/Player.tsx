@@ -9,6 +9,7 @@ import {
   Ratio,
   Subtitles,
   Pause,
+  PictureInPicture2,
   Play,
   Repeat,
   Repeat1,
@@ -30,6 +31,8 @@ import {
   type FitMode,
 } from "../lib/player";
 import { api } from "../lib/api";
+import { abrirPopup, cerrarPopup } from "../lib/popup";
+import { usePuenteConPopup } from "../lib/popupBridge";
 import { useStore } from "../lib/store";
 import type { SubtitleTrack } from "../lib/types";
 
@@ -46,6 +49,7 @@ function clock(total: number): string {
 export function Player() {
   const p = usePlayer();
   const toast = useStore((s) => s.toast);
+  usePuenteConPopup();
   const ref = useRef<HTMLVideoElement>(null);
   const [arrastrando, setArrastrando] = useState<number | null>(null);
   const [pantallaCompleta, setPantallaCompleta] = useState(false);
@@ -117,12 +121,14 @@ export function Player() {
   useEffect(() => {
     const el = ref.current;
     if (!el || !p.current) return;
-    if (p.playing) {
+    // Con la ventana flotante abierta reproduce ella; aquí solo se calla, o se
+    // oiría el mismo archivo dos veces y desfasado.
+    if (p.playing && !p.popup) {
       el.play().catch(() => usePlayer.setState({ playing: false }));
     } else {
       el.pause();
     }
-  }, [p.playing, p.current]);
+  }, [p.playing, p.current, p.popup]);
 
   useEffect(() => {
     const el = ref.current;
@@ -137,11 +143,15 @@ export function Player() {
   // actualización cortaría el sonido continuamente.
   useEffect(() => {
     const el = ref.current;
-    if (el && Math.abs(el.currentTime - p.position) > 0.5) {
+    // Mientras reproduce la flotante, la posición que llega es la suya: seguirla
+    // aquí sería mover un vídeo en pausa que nadie está viendo.
+    if (el && !p.popup && Math.abs(el.currentTime - p.position) > 0.5) {
       el.currentTime = p.position;
     }
+    // Al cerrarse la flotante también hay que recolocar: aquí el vídeo se quedó
+    // donde estaba cuando se abrió.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.position]);
+  }, [p.position, p.popup]);
 
   // Controles del sistema: el panel multimedia de Windows, las teclas de
   // reproducción del teclado y la pantalla de bloqueo. Se alimenta del elemento
@@ -417,6 +427,30 @@ export function Player() {
     </div>
   ) : null;
 
+  // Solo para vídeo: una canción no necesita una ventana donde mirarla.
+  const botonPopup = esVideo ? (
+    <Boton
+      title={
+        p.popup
+          ? "Cerrar la ventana flotante"
+          : "Ver en una ventana flotante, encima de todo"
+      }
+      activo={p.popup}
+      onClick={() => {
+        if (p.popup) {
+          p.setPopup(false);
+          void cerrarPopup();
+        } else {
+          abrirPopup().catch(() =>
+            toast("error", "No se ha podido abrir la ventana flotante."),
+          );
+        }
+      }}
+    >
+      <PictureInPicture2 size={15} />
+    </Boton>
+  ) : null;
+
   const botonPantalla = esVideo ? (
     <Boton
       title={
@@ -527,6 +561,7 @@ export function Player() {
                 <>
                   {ajuste}
                   {selectorSubs}
+                  {botonPopup}
                   {botonPantalla}
                   {modoAudio}
                   <Velocidad rate={p.rate} onChange={p.setRate} />
@@ -575,8 +610,9 @@ export function Player() {
               <Velocidad rate={p.rate} onChange={p.setRate} />
               {volumen}
               {selectorSubs}
+              {botonPopup}
               {modoAudio}
-              {esVideo && !p.audioOnly && (
+              {esVideo && !p.audioOnly && !p.popup && (
                 <Boton title="Ampliar" onClick={() => p.setExpanded(true)}>
                   <Maximize2 size={15} />
                 </Boton>

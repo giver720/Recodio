@@ -43,6 +43,14 @@ interface PlayerState {
   audioOnly: boolean;
   /** Cómo encaja el vídeo en la ventana ampliada. */
   fit: FitMode;
+  /** La ventana flotante está abierta y es la que reproduce. */
+  popup: boolean;
+  /**
+   * Sube en cada salto pedido a mano. La posición cambia sola cuatro veces por
+   * segundo mientras suena, así que no sirve para distinguir un salto real; esto
+   * sí, y es lo que se le manda a la ventana flotante.
+   */
+  seekNonce: number;
 
   /** Empieza a reproducir `item`, con `list` como cola. */
   play: (item: LibraryItem, list?: LibraryItem[]) => void;
@@ -59,6 +67,7 @@ interface PlayerState {
   setExpanded: (v: boolean) => void;
   toggleAudioOnly: () => void;
   setFit: (f: FitMode) => void;
+  setPopup: (v: boolean) => void;
 
   /** Las escribe el elemento de audio o vídeo mientras suena. */
   reportTime: (position: number, duration: number) => void;
@@ -98,6 +107,8 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   // siempre, no una vez.
   audioOnly: localStorage.getItem("recodio.audioOnly") === "1",
   fit: (localStorage.getItem("recodio.fit") as FitMode) || "contain",
+  popup: false,
+  seekNonce: 0,
 
   play: (item, list) => {
     const base = list && list.length > 0 ? list : [item];
@@ -179,7 +190,8 @@ export const usePlayer = create<PlayerState>((set, get) => ({
       expanded: false,
     }),
 
-  seek: (seconds) => set({ position: Math.max(0, seconds) }),
+  seek: (seconds) =>
+    set((s) => ({ position: Math.max(0, seconds), seekNonce: s.seekNonce + 1 })),
   setVolume: (v) => set({ volume: Math.min(1, Math.max(0, v)), muted: false }),
   toggleMute: () => set((s) => ({ muted: !s.muted })),
   setRate: (r) => set({ rate: r }),
@@ -199,6 +211,10 @@ export const usePlayer = create<PlayerState>((set, get) => ({
       return { shuffle, queue: cola, index: 0 };
     }),
   setExpanded: (v) => set({ expanded: v }),
+
+  // Con la flotante abierta no tiene sentido ocupar toda la ventana principal:
+  // el vídeo se está viendo en otro sitio.
+  setPopup: (popup) => set({ popup, expanded: popup ? false : get().expanded }),
 
   setFit: (fit) => {
     localStorage.setItem("recodio.fit", fit);
