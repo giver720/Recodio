@@ -1,6 +1,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
+  CheckCircle2,
   CheckCheck,
   ClipboardPaste,
   Copy,
@@ -9,14 +10,20 @@ import {
   Film,
   FolderOpen,
   History,
+  Heart,
   Link2,
   ListChecks,
+  ListVideo,
+  LogIn,
+  LoaderCircle,
   Music,
   Play,
+  Radio,
   RotateCcw,
   Search,
   Sparkles,
   Trash2,
+  UserRound,
   X,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
@@ -36,7 +43,7 @@ import {
 import { api } from "../lib/api";
 import { duration } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { AnalyzeResult, Entry, Kind } from "../lib/types";
+import type { AnalyzeResult, Entry, Kind, YoutubeSessionStatus } from "../lib/types";
 
 const WEB_URL = /^(?:https?:\/\/|www\.)/i;
 
@@ -54,6 +61,30 @@ function inputTargets(value: string) {
 
   return { targets: [`ytsearch20:${trimmed}`], query: trimmed };
 }
+
+const YOUTUBE_BROWSERS = [
+  { value: "", label: "Elegir navegador" },
+  { value: "chrome", label: "Chrome" },
+  { value: "edge", label: "Edge" },
+  { value: "firefox", label: "Firefox" },
+  { value: "brave", label: "Brave" },
+  { value: "opera", label: "Opera" },
+  { value: "vivaldi", label: "Vivaldi" },
+  { value: "chromium", label: "Chromium" },
+];
+
+const YOUTUBE_FEEDS = [
+  { target: ":ytrec", label: "Recomendados", icon: Sparkles },
+  { target: ":ytsubs", label: "Suscripciones", icon: Radio },
+  { target: ":ytfav", label: "Me gusta", icon: Heart },
+  { target: ":ytwatchlater", label: "Ver más tarde", icon: History },
+  { target: ":ythis", label: "Historial", icon: History },
+  {
+    target: "https://www.youtube.com/feed/playlists",
+    label: "Mis playlists",
+    icon: ListVideo,
+  },
+];
 
 export function Downloader({ onQueued }: { onQueued: () => void }) {
   const settings = useStore((s) => s.settings);
@@ -73,6 +104,11 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [filter, setFilter] = useState("");
   const [blockSize, setBlockSize] = useState(50);
   const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
+  const [youtubeStatus, setYoutubeStatus] = useState<YoutubeSessionStatus | null>(null);
+  const [checkingYoutube, setCheckingYoutube] = useState(false);
+  const cookieSpec = settings?.cookiesFromBrowser ?? "";
+  const [cookieBrowser = "", ...profileParts] = cookieSpec.split(":");
+  const cookieProfile = profileParts.join(":");
 
   // El análisis en curso, para que los envíos tardíos no se cuelen en otro.
   const analisisActivo = useRef<string | null>(null);
@@ -101,6 +137,11 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    // Cambiar de navegador o perfil invalida la comprobación anterior.
+    setYoutubeStatus(null);
+  }, [cookieSpec]);
+
   const existingOf = (e: Entry, k: Kind) =>
     k === "audio" ? e.existingAudio : e.existingVideo;
 
@@ -124,8 +165,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     setOverwrite(ow);
   }
 
-  async function analyze(refresh = false) {
-    const { targets, query } = inputTargets(url);
+  async function analyze(
+    refresh = false,
+    value = url,
+    feedLabel: string | null = null,
+  ) {
+    const parsed = inputTargets(value);
+    const targets = feedLabel ? [value] : parsed.targets;
+    const query = feedLabel ?? parsed.query;
     if (targets.length === 0) return;
 
     setAnalyzing(true);
@@ -180,6 +227,49 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     } catch {
       toast("info", "No se pudo leer el portapapeles");
     }
+  }
+
+  function setYoutubeBrowser(browser: string, profile = cookieProfile) {
+    const spec = browser ? `${browser}${profile.trim() ? `:${profile.trim()}` : ""}` : null;
+    saveSettings({ cookiesFromBrowser: spec });
+  }
+
+  async function openYoutubeLogin() {
+    try {
+      await api.openFolder("https://accounts.google.com/ServiceLogin?service=youtube");
+      toast("info", "Inicia sesión en YouTube y vuelve a Recodio cuando termines");
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  async function checkYoutube() {
+    if (!cookieSpec) {
+      toast("info", "Elige el navegador donde tienes abierta tu cuenta de YouTube");
+      return;
+    }
+    setCheckingYoutube(true);
+    setYoutubeStatus(null);
+    try {
+      const status = await api.youtubeSessionCheck(cookieSpec);
+      setYoutubeStatus(status);
+      toast(status.connected ? "success" : "error", status.message);
+    } catch (e) {
+      const status = { connected: false, message: String(e) };
+      setYoutubeStatus(status);
+      toast("error", status.message);
+    } finally {
+      setCheckingYoutube(false);
+    }
+  }
+
+  function openYoutubeFeed(target: string, label: string) {
+    if (!youtubeStatus?.connected) {
+      toast("info", "Comprueba primero la sesión de YouTube");
+      return;
+    }
+    setUrl(label);
+    analyze(false, target, label);
   }
 
   async function pickFolder() {
@@ -242,6 +332,75 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-6 py-6">
       <MissingTools tools={tools} />
+
+      {/* ---- Cuenta de YouTube ---- */}
+      <div className="rc-card overflow-hidden">
+        <div className="flex flex-wrap items-center gap-3 p-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/12 text-accent2">
+            <UserRound size={19} />
+          </div>
+          <div className="min-w-48 flex-1">
+            <p className="text-[13px] font-semibold">
+              {youtubeStatus?.connected
+                ? "YouTube conectado"
+                : cookieSpec
+                  ? "Cuenta de YouTube sin comprobar"
+                  : "Conecta tu cuenta de YouTube"}
+            </p>
+            <p className="text-[11.5px] leading-snug text-muted">
+              {youtubeStatus
+                ? youtubeStatus.message
+                : cookieSpec
+                  ? `Preparado para comprobar ${cookieBrowser}${cookieProfile ? ` · perfil ${cookieProfile}` : ""}.`
+                : "Recodio reutiliza la sesión de tu navegador; nunca pide ni guarda tu contraseña."}
+            </p>
+          </div>
+          <div className="w-40">
+            <Select
+              value={cookieBrowser}
+              onChange={(browser) => setYoutubeBrowser(browser)}
+              options={YOUTUBE_BROWSERS}
+            />
+          </div>
+          {cookieBrowser && (
+            <input
+              value={cookieProfile}
+              onChange={(e) => setYoutubeBrowser(cookieBrowser, e.target.value)}
+              placeholder="Perfil (opcional)"
+              title="Ejemplo: Default o Profile 1"
+              className={`${inputClass} w-40`}
+              spellCheck={false}
+            />
+          )}
+          <Button onClick={openYoutubeLogin}>
+            <LogIn size={14} /> {cookieSpec ? "Cambiar cuenta" : "Iniciar sesión"}
+          </Button>
+          {cookieSpec && (
+            <Button
+              variant={youtubeStatus?.connected ? "soft" : "primary"}
+              onClick={checkYoutube}
+              disabled={checkingYoutube}
+            >
+              {checkingYoutube ? (
+                <LoaderCircle size={14} className="animate-spin" />
+              ) : (
+                <CheckCircle2 size={14} />
+              )}
+              {checkingYoutube ? "Comprobando…" : "Comprobar"}
+            </Button>
+          )}
+        </div>
+
+        {youtubeStatus?.connected && (
+          <div className="flex flex-wrap gap-2 border-t border-line bg-surface2/40 px-4 py-3">
+            {YOUTUBE_FEEDS.map(({ target, label, icon: Icon }) => (
+              <Button key={target} onClick={() => openYoutubeFeed(target, label)}>
+                <Icon size={14} /> {label}
+              </Button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ---- Barra de búsqueda / enlace ---- */}
       <div className="rc-card p-4">

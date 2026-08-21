@@ -18,12 +18,16 @@ import type {
   Source,
   SubtitleTrack,
   ToolStatus,
+  YoutubeSessionStatus,
 } from "./types";
 
 export const api = {
   /** `refresh` ignora el listado guardado y vuelve a pedirlo. */
   analyzeUrl: (url: string, refresh = false) =>
     invoke<AnalyzeResult>("analyze_url", { url, refresh }),
+
+  youtubeSessionCheck: (browser: string) =>
+    invoke<YoutubeSessionStatus>("youtube_session_check", { browser }),
 
   enqueue: (req: {
     entries: Entry[];

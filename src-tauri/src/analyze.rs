@@ -155,6 +155,13 @@ async fn analyze_ytdlp(url: &str, bins: &Binaries, settings: &Settings) -> Resul
         .arg("--ignore-config")
         .arg("--no-playlist-reverse");
 
+    // Los feeds de una cuenta (historial, suscripciones, etc.) pueden contener
+    // miles de elementos. La pantalla es para descubrir y elegir, no para
+    // descargar de golpe toda la vida de la cuenta.
+    if url.starts_with(":yt") || url == "https://www.youtube.com/feed/playlists" {
+        cmd.arg("--playlist-end").arg("100");
+    }
+
     crate::ytdlp::apply_access_args(&mut cmd, settings);
     cmd.arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
 
