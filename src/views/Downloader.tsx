@@ -38,6 +38,23 @@ import { duration } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { AnalyzeResult, Entry, Kind } from "../lib/types";
 
+const WEB_URL = /^(?:https?:\/\/|www\.)/i;
+
+function inputTargets(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return { targets: [] as string[], query: null as string | null };
+
+  // Una frase normal es una búsqueda. Solo se separa por espacios cuando todo
+  // lo introducido son enlaces; así «daft punk around the world» no termina
+  // analizándose como cinco direcciones distintas.
+  const parts = trimmed.split(/[\n\s]+/).filter(Boolean);
+  if (parts.every((part) => WEB_URL.test(part))) {
+    return { targets: parts, query: null };
+  }
+
+  return { targets: [`ytsearch20:${trimmed}`], query: trimmed };
+}
+
 export function Downloader({ onQueued }: { onQueued: () => void }) {
   const settings = useStore((s) => s.settings);
   const toast = useStore((s) => s.toast);
@@ -55,6 +72,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [destDir, setDestDir] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [blockSize, setBlockSize] = useState(50);
+  const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
 
   // El análisis en curso, para que los envíos tardíos no se cuelen en otro.
   const analisisActivo = useRef<string | null>(null);
@@ -107,21 +125,18 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   }
 
   async function analyze(refresh = false) {
-    const urls = url
-      .split(/[\n\s]+/)
-      .map((u) => u.trim())
-      .filter(Boolean);
-    if (urls.length === 0) return;
+    const { targets, query } = inputTargets(url);
+    if (targets.length === 0) return;
 
     setAnalyzing(true);
     setStartedAt(Date.now());
     setResult(null);
     try {
       const results: AnalyzeResult[] = [];
-      for (const u of urls) {
+      for (const u of targets) {
         results.push(await api.analyzeUrl(u, refresh));
       }
-      const merged: AnalyzeResult =
+      let merged: AnalyzeResult =
         results.length === 1
           ? results[0]
           : {
@@ -131,11 +146,18 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               entries: results.flatMap((r) => r.entries),
             };
 
+      if (query) {
+        // Los resultados de ytsearch llegan con forma de playlist, pero una
+        // búsqueda no debe crear una colección artificial en la biblioteca.
+        merged = { ...merged, isPlaylist: false, playlist: null };
+      }
+
       // spotDL only produces audio, so don't offer a video toggle that lies.
       const nextKind: Kind = merged.source === "spotdl" ? "audio" : kind;
       setKind(nextKind);
       analisisActivo.current = merged.key ?? null;
       setResult(merged);
+      setSearchedQuery(query);
       applyDefaults(merged, nextKind);
       setDestDir(null);
       setFilter("");
@@ -187,6 +209,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       toast("success", `${n} ${n === 1 ? "elemento añadido" : "elementos añadidos"} a la cola`);
       setResult(null);
       setUrl("");
+      setSearchedQuery(null);
       onQueued();
     } catch (e) {
       toast("error", String(e));
@@ -220,17 +243,21 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-6 py-6">
       <MissingTools tools={tools} />
 
-      {/* ---- Barra de enlace ---- */}
+      {/* ---- Barra de búsqueda / enlace ---- */}
       <div className="rc-card p-4">
         <div className="flex items-center gap-2">
-          <Link2 size={17} className="ml-1 shrink-0 text-muted" />
+          {WEB_URL.test(url.trim()) ? (
+            <Link2 size={17} className="ml-1 shrink-0 text-muted" />
+          ) : (
+            <Search size={17} className="ml-1 shrink-0 text-muted" />
+          )}
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) analyze();
             }}
-            placeholder="Pega un enlace de YouTube, Spotify, Twitch, X, TikTok… o varios separados por saltos de línea"
+            placeholder="Busca en YouTube o pega un enlace de YouTube, Spotify, Twitch, TikTok…"
             className={`${inputClass} border-transparent bg-transparent text-[14px] focus:border-transparent`}
             spellCheck={false}
           />
@@ -251,7 +278,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               </>
             ) : (
               <>
-                <Search size={15} /> Analizar
+                <Search size={15} /> {WEB_URL.test(url.trim()) ? "Analizar" : "Buscar"}
               </>
             )}
           </Button>
@@ -263,8 +290,8 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       {!analyzing && !result && (
         <EmptyState
           icon={<Download size={22} />}
-          title="Pega un enlace para empezar"
-          body="Recodio usa yt-dlp, así que funciona con miles de sitios: YouTube, Twitch, X, TikTok, Vimeo, Instagram… y spotDL para Spotify."
+          title="Busca un vídeo o pega un enlace"
+          body="Escribe un título, artista o tema para buscar directamente en YouTube. También puedes pegar enlaces de YouTube, Twitch, X, TikTok, Vimeo, Instagram o Spotify."
         />
       )}
 
@@ -310,14 +337,16 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               />
               <div className="min-w-0 flex-1">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-accent2">
-                  {result.isPlaylist
+                  {searchedQuery
+                    ? `Resultados de YouTube · ${result.entries.length}`
+                    : result.isPlaylist
                     ? `Playlist · ${result.entries.length} elementos`
                     : result.source === "spotdl"
                       ? "Pista de Spotify"
                       : "Elemento suelto"}
                 </p>
                 <h2 className="mt-0.5 truncate text-[17px] font-semibold">
-                  {result.playlist?.title ?? result.entries[0]?.title ?? "Sin título"}
+                  {searchedQuery ?? result.playlist?.title ?? result.entries[0]?.title ?? "Sin título"}
                 </h2>
                 <p className="truncate text-[13px] text-muted">
                   {result.playlist?.uploader ?? result.entries[0]?.uploader ?? ""}
