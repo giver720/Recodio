@@ -211,3 +211,8 @@ export interface ToolStatus {
   version: string | null;
   managed: boolean;
 }
+
+export interface YoutubeSessionStatus {
+  connected: boolean;
+  message: string;
+}

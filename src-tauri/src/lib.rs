@@ -110,6 +110,72 @@ async fn analyze_url(
     Ok(result)
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YoutubeSessionStatus {
+    connected: bool,
+    message: String,
+}
+
+/// Comprueba de verdad que yt-dlp puede leer la cuenta elegida. Guardar el
+/// nombre de un navegador no significa que haya una sesión de YouTube dentro.
+#[tauri::command]
+async fn youtube_session_check(
+    browser: String,
+    state: State<'_, AppState>,
+) -> CmdResult<YoutubeSessionStatus> {
+    const NAVEGADORES: &[&str] = &[
+        "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari",
+        "vivaldi", "whale",
+    ];
+
+    let browser = browser.trim().to_string();
+    let nombre = browser.split([':', '+']).next().unwrap_or("");
+    if !NAVEGADORES.contains(&nombre) {
+        return Err("El navegador elegido no es compatible con yt-dlp".into());
+    }
+
+    let exe = state.core.bins.require("yt-dlp").map_err(err)?;
+    let mut settings = state.core.settings.read().unwrap().clone();
+    settings.cookies_from_browser = Some(browser);
+    settings.cookies_file = None;
+
+    let mut cmd = proc::async_command(exe);
+    cmd.arg("--ignore-config")
+        .arg("--flat-playlist")
+        .arg("--playlist-end")
+        .arg("1")
+        .arg("--dump-single-json")
+        .arg("--no-warnings");
+    ytdlp::apply_access_args(&mut cmd, &settings);
+    cmd.arg(":ytfav");
+
+    let output = cmd.output().await.map_err(err)?;
+    if output.status.success() && !output.stdout.is_empty() {
+        return Ok(YoutubeSessionStatus {
+            connected: true,
+            message: "Sesión de YouTube verificada".into(),
+        });
+    }
+
+    let raw = String::from_utf8_lossy(&output.stderr);
+    let cleaned = analyze::clean_ytdlp_error(&raw);
+    let message = if cleaned.is_empty() {
+        "No se encontró una sesión de YouTube activa en ese navegador".into()
+    } else if cleaned.to_ascii_lowercase().contains("could not copy")
+        || cleaned.to_ascii_lowercase().contains("database")
+    {
+        "Cierra completamente el navegador y vuelve a comprobar la cuenta".into()
+    } else {
+        cleaned
+    };
+
+    Ok(YoutubeSessionStatus {
+        connected: false,
+        message,
+    })
+}
+
 // ------------------------------------------------------------------- cola
 
 #[derive(Debug, Deserialize)]
@@ -801,6 +867,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             analyze_url,
+            youtube_session_check,
             enqueue,
             queue_list,
             queue_stats,
