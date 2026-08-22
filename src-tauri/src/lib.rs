@@ -10,6 +10,7 @@ mod queue;
 mod refresh;
 mod repair;
 mod settings;
+mod spotify;
 mod subs;
 mod thumbs;
 mod ytdlp;
@@ -25,10 +26,12 @@ use settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 pub struct AppState {
     core: Arc<Core>,
     queue: Queue,
+    spotify: Arc<spotify::SpotifyAuth>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -121,24 +124,41 @@ struct YoutubeSessionStatus {
 /// nombre de un navegador no significa que haya una sesión de YouTube dentro.
 #[tauri::command]
 async fn youtube_session_check(
-    browser: String,
+    browser: Option<String>,
+    cookies_file: Option<PathBuf>,
     state: State<'_, AppState>,
 ) -> CmdResult<YoutubeSessionStatus> {
     const NAVEGADORES: &[&str] = &[
-        "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari",
-        "vivaldi", "whale",
+        "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale",
     ];
-
-    let browser = browser.trim().to_string();
-    let nombre = browser.split([':', '+']).next().unwrap_or("");
-    if !NAVEGADORES.contains(&nombre) {
-        return Err("El navegador elegido no es compatible con yt-dlp".into());
-    }
 
     let exe = state.core.bins.require("yt-dlp").map_err(err)?;
     let mut settings = state.core.settings.read().unwrap().clone();
-    settings.cookies_from_browser = Some(browser);
-    settings.cookies_file = None;
+    match (
+        browser
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty()),
+        cookies_file.filter(|p| p.is_file()),
+    ) {
+        (Some(browser), None) => {
+            let nombre = browser.split([':', '+']).next().unwrap_or("");
+            if !NAVEGADORES.contains(&nombre) {
+                return Err("El navegador elegido no es compatible con yt-dlp".into());
+            }
+            settings.cookies_from_browser = Some(browser);
+            settings.cookies_file = None;
+        }
+        (None, Some(file)) => {
+            settings.cookies_from_browser = None;
+            settings.cookies_file = Some(file);
+        }
+        (Some(_), Some(_)) => {
+            return Err("Elige un navegador o un archivo de cookies, no ambos".into());
+        }
+        (None, None) => {
+            return Err("Elige un navegador o importa un archivo cookies.txt".into());
+        }
+    }
 
     let mut cmd = proc::async_command(exe);
     cmd.arg("--ignore-config")
@@ -159,13 +179,16 @@ async fn youtube_session_check(
     }
 
     let raw = String::from_utf8_lossy(&output.stderr);
+    let raw_lower = raw.to_ascii_lowercase();
     let cleaned = analyze::clean_ytdlp_error(&raw);
     let message = if cleaned.is_empty() {
         "No se encontró una sesión de YouTube activa en ese navegador".into()
-    } else if cleaned.to_ascii_lowercase().contains("could not copy")
-        || cleaned.to_ascii_lowercase().contains("database")
-    {
+    } else if raw_lower.contains("failed to decrypt with dpapi") {
+        "Brave, Chrome y Edge protegen sus cookies en Windows y no permiten que Recodio las descifre. Usa Firefox o pulsa «Importar cookies.txt».".into()
+    } else if raw_lower.contains("could not copy") || raw_lower.contains("database") {
         "Cierra completamente el navegador y vuelve a comprobar la cuenta".into()
+    } else if raw_lower.contains("failed to load cookies") {
+        "El archivo de cookies no es válido o ya caducó. Expórtalo de nuevo en formato Netscape cookies.txt".into()
     } else {
         cleaned
     };
@@ -174,6 +197,257 @@ async fn youtube_session_check(
         connected: false,
         message,
     })
+}
+
+/// Copia un `cookies.txt` a la carpeta privada de configuración de Recodio.
+/// Guardar una copia evita que la sesión deje de funcionar cuando el usuario
+/// borra el archivo original de Descargas. El contenido nunca vuelve al webview.
+#[tauri::command]
+fn youtube_import_cookies(source: PathBuf, state: State<'_, AppState>) -> CmdResult<String> {
+    const MAX_COOKIE_FILE: u64 = 10 * 1024 * 1024;
+
+    let metadata = std::fs::metadata(&source)
+        .map_err(|_| "No se pudo abrir el archivo de cookies seleccionado".to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_COOKIE_FILE {
+        return Err("El archivo de cookies está vacío o es demasiado grande".into());
+    }
+
+    let data = std::fs::read(&source).map_err(err)?;
+    let text = String::from_utf8_lossy(&data);
+    let header = text.lines().next().unwrap_or_default().trim();
+    if header != "# Netscape HTTP Cookie File" && header != "# HTTP Cookie File" {
+        return Err(
+            "El archivo debe estar en formato Netscape cookies.txt (no JSON ni CSV)".into(),
+        );
+    }
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("youtube.com") && !lower.contains("google.com") {
+        return Err("El archivo no contiene cookies de YouTube".into());
+    }
+
+    let config_dir = state
+        .core
+        .settings_path
+        .parent()
+        .ok_or_else(|| "No se encontró la carpeta de configuración de Recodio".to_string())?;
+    std::fs::create_dir_all(config_dir).map_err(err)?;
+    let dest = config_dir.join("youtube-cookies.txt");
+    let temp = config_dir.join("youtube-cookies.txt.new");
+    std::fs::write(&temp, data).map_err(err)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).map_err(err)?;
+    }
+
+    if dest.exists() {
+        std::fs::remove_file(&dest).map_err(err)?;
+    }
+    std::fs::rename(&temp, &dest).map_err(err)?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn youtube_open_login(browser: Option<String>, app: tauri::AppHandle) -> CmdResult<()> {
+    const URL: &str = "https://accounts.google.com/ServiceLogin?service=youtube";
+    let Some(browser) = browser.filter(|b| !b.trim().is_empty()) else {
+        return app.opener().open_url(URL, None::<&str>).map_err(err);
+    };
+    let name = browser.split([':', '+']).next().unwrap_or("");
+    let program = browser_program(name)
+        .ok_or_else(|| format!("No se encontró {name} instalado en este equipo"))?;
+    app.opener().open_url(URL, Some(program)).map_err(err)
+}
+
+fn browser_program(browser: &str) -> Option<String> {
+    let executable = match browser {
+        "chrome" => "chrome",
+        "edge" => "msedge",
+        "firefox" => "firefox",
+        "brave" => "brave",
+        "opera" => "opera",
+        "vivaldi" => "vivaldi",
+        "chromium" => "chromium",
+        _ => return None,
+    };
+    if let Ok(path) = which::which(executable) {
+        return Some(path.to_string_lossy().into_owned());
+    }
+
+    #[cfg(windows)]
+    {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+        let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+        let relative: &[&str] = match browser {
+            "chrome" => &[r"Google\Chrome\Application\chrome.exe"],
+            "edge" => &[r"Microsoft\Edge\Application\msedge.exe"],
+            "firefox" => &[r"Mozilla Firefox\firefox.exe"],
+            "brave" => &[r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+            "opera" => &[r"Programs\Opera\launcher.exe"],
+            "vivaldi" => &[r"Vivaldi\Application\vivaldi.exe"],
+            "chromium" => &[r"Chromium\Application\chrome.exe"],
+            _ => &[],
+        };
+        for base in [local, program_files, program_files_x86]
+            .into_iter()
+            .flatten()
+        {
+            for rel in relative {
+                let candidate = base.join(rel);
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpotifySessionStatus {
+    connected: bool,
+    profile: Option<spotify::SpotifyProfile>,
+    message: String,
+}
+
+#[tauri::command]
+async fn spotify_status(state: State<'_, AppState>) -> CmdResult<SpotifySessionStatus> {
+    if !state.spotify.has_session().await {
+        return Ok(SpotifySessionStatus {
+            connected: false,
+            profile: None,
+            message: "Conecta tu cuenta para ver tu música de Spotify".into(),
+        });
+    }
+    match state.spotify.profile().await {
+        Ok(profile) => Ok(SpotifySessionStatus {
+            connected: true,
+            profile: Some(profile),
+            message: "Sesión de Spotify activa".into(),
+        }),
+        Err(error) => Ok(SpotifySessionStatus {
+            connected: false,
+            profile: None,
+            message: error.to_string(),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn spotify_login(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<spotify::SpotifyProfile> {
+    state.spotify.login(&app).await.map_err(err)
+}
+
+#[tauri::command]
+async fn spotify_logout(state: State<'_, AppState>) -> CmdResult<()> {
+    state.spotify.logout().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn spotify_playlists(state: State<'_, AppState>) -> CmdResult<Vec<spotify::SpotifyPlaylist>> {
+    state.spotify.playlists().await.map_err(err)
+}
+
+fn spotify_analyze_result(
+    tracks: Vec<spotify::SpotifyTrack>,
+    title: String,
+    source_id: String,
+    url: String,
+    state: &AppState,
+) -> AnalyzeResult {
+    let playlist_id = state.core.db.playlist_id_for("spotdl", &source_id);
+    let thumbnail = tracks.first().and_then(|track| track.image_url.clone());
+    let mut entries = tracks
+        .into_iter()
+        .enumerate()
+        .map(|(index, track)| Entry {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_id: track.id,
+            extractor: "spotify".into(),
+            title: if track.artists.is_empty() {
+                track.name
+            } else {
+                format!("{} - {}", track.artists, track.name)
+            },
+            url: track.external_url,
+            uploader: (!track.artists.is_empty()).then_some(track.artists),
+            duration: track.duration,
+            thumbnail: track.image_url,
+            index: index as i64 + 1,
+            existing_video: None,
+            existing_audio: None,
+            unavailable: false,
+        })
+        .collect::<Vec<_>>();
+    analyze::marcar_duplicados(&mut entries, &state.core.db, playlist_id.as_deref());
+    AnalyzeResult {
+        source: "spotdl".into(),
+        is_playlist: true,
+        playlist: Some(PlaylistInfo {
+            source_id,
+            title,
+            url,
+            uploader: Some("Spotify".into()),
+            thumbnail,
+        }),
+        entries,
+        cached_at: None,
+        partial: false,
+        key: String::new(),
+        notice: None,
+    }
+}
+
+#[tauri::command]
+async fn spotify_collection(
+    collection: String,
+    state: State<'_, AppState>,
+) -> CmdResult<AnalyzeResult> {
+    let profile = state.spotify.profile().await.map_err(err)?;
+    let (tracks, label, key) = match collection.as_str() {
+        "saved" => (
+            state.spotify.saved_tracks().await,
+            "Canciones que te gustan",
+            "saved",
+        ),
+        "top" => (
+            state.spotify.top_tracks().await,
+            "Más escuchadas para ti",
+            "top",
+        ),
+        "recent" => (
+            state.spotify.recent_tracks().await,
+            "Escuchado recientemente",
+            "recent",
+        ),
+        _ => return Err("Colección de Spotify desconocida".into()),
+    };
+    Ok(spotify_analyze_result(
+        tracks.map_err(err)?,
+        label.into(),
+        format!("spotify:{}:{key}", profile.id),
+        "https://open.spotify.com/collection".into(),
+        &state,
+    ))
+}
+
+#[tauri::command]
+async fn spotify_playlist(
+    id: String,
+    name: String,
+    url: String,
+    state: State<'_, AppState>,
+) -> CmdResult<AnalyzeResult> {
+    let tracks = state.spotify.playlist_tracks(&id).await.map_err(err)?;
+    Ok(spotify_analyze_result(tracks, name, id, url, &state))
 }
 
 // ------------------------------------------------------------------- cola
@@ -509,9 +783,15 @@ async fn library_refresh(
     let raices = core.settings.read().unwrap().scan_roots();
 
     tauri::async_runtime::spawn_blocking(move || {
-        refresh::refresh(&core.db, &core.bins, &data_dir, &raices, |fase, hechos, total| {
-            let _ = emisor.emit("refresh-progress", (fase, hechos, total));
-        })
+        refresh::refresh(
+            &core.db,
+            &core.bins,
+            &data_dir,
+            &raices,
+            |fase, hechos, total| {
+                let _ = emisor.emit("refresh-progress", (fase, hechos, total));
+            },
+        )
     })
     .await
     .map_err(err)?
@@ -720,7 +1000,11 @@ fn detect_players() -> Vec<PlayerOption> {
     } else if cfg!(target_os = "macos") {
         &[
             ("VLC", "vlc", &["/Applications/VLC.app/Contents/MacOS/VLC"]),
-            ("IINA", "iina", &["/Applications/IINA.app/Contents/MacOS/IINA"]),
+            (
+                "IINA",
+                "iina",
+                &["/Applications/IINA.app/Contents/MacOS/IINA"],
+            ),
             ("mpv", "mpv", &[]),
         ]
     } else {
@@ -736,12 +1020,9 @@ fn detect_players() -> Vec<PlayerOption> {
     candidatos
         .iter()
         .filter_map(|(nombre, comando, rutas)| {
-            let encontrado = which::which(comando).ok().or_else(|| {
-                rutas
-                    .iter()
-                    .map(PathBuf::from)
-                    .find(|p| p.is_file())
-            })?;
+            let encontrado = which::which(comando)
+                .ok()
+                .or_else(|| rutas.iter().map(PathBuf::from).find(|p| p.is_file()))?;
             Some(PlayerOption {
                 name: (*nombre).to_string(),
                 path: encontrado.to_string_lossy().into_owned(),
@@ -862,12 +1143,25 @@ pub fn run() {
                 }
             });
 
-            app.manage(AppState { core, queue });
+            let spotify = Arc::new(spotify::SpotifyAuth::new()?);
+            app.manage(AppState {
+                core,
+                queue,
+                spotify,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             analyze_url,
             youtube_session_check,
+            youtube_import_cookies,
+            youtube_open_login,
+            spotify_status,
+            spotify_login,
+            spotify_logout,
+            spotify_playlists,
+            spotify_collection,
+            spotify_playlist,
             enqueue,
             queue_list,
             queue_stats,

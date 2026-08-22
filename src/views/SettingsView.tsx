@@ -331,7 +331,7 @@ export function SettingsView() {
         >
           <Select
             value={s.cookiesFromBrowser ?? ""}
-            onChange={(v) => save({ cookiesFromBrowser: v || null })}
+            onChange={(v) => save({ cookiesFromBrowser: v || null, cookiesFile: null })}
             options={[
               { value: "", label: "No usar cookies" },
               { value: "chrome", label: "Chrome" },

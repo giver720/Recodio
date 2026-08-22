@@ -15,6 +15,9 @@ import type {
   PlaylistInfo,
   QueueStats,
   Settings,
+  SpotifyPlaylist,
+  SpotifyProfile,
+  SpotifySessionStatus,
   Source,
   SubtitleTrack,
   ToolStatus,
@@ -26,8 +29,26 @@ export const api = {
   analyzeUrl: (url: string, refresh = false) =>
     invoke<AnalyzeResult>("analyze_url", { url, refresh }),
 
-  youtubeSessionCheck: (browser: string) =>
-    invoke<YoutubeSessionStatus>("youtube_session_check", { browser }),
+  youtubeSessionCheck: (browser: string | null, cookiesFile: string | null) =>
+    invoke<YoutubeSessionStatus>("youtube_session_check", { browser, cookiesFile }),
+
+  youtubeImportCookies: (source: string) =>
+    invoke<string>("youtube_import_cookies", { source }),
+  youtubeOpenLogin: (browser: string | null) =>
+    invoke<void>("youtube_open_login", { browser }),
+
+  spotifyStatus: () => invoke<SpotifySessionStatus>("spotify_status"),
+  spotifyLogin: () => invoke<SpotifyProfile>("spotify_login"),
+  spotifyLogout: () => invoke<void>("spotify_logout"),
+  spotifyPlaylists: () => invoke<SpotifyPlaylist[]>("spotify_playlists"),
+  spotifyCollection: (collection: "saved" | "top" | "recent") =>
+    invoke<AnalyzeResult>("spotify_collection", { collection }),
+  spotifyPlaylist: (playlist: SpotifyPlaylist) =>
+    invoke<AnalyzeResult>("spotify_playlist", {
+      id: playlist.id,
+      name: playlist.name,
+      url: playlist.externalUrl,
+    }),
 
   enqueue: (req: {
     entries: Entry[];

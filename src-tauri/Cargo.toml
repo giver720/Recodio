@@ -1,6 +1,6 @@
 [package]
 name = "recodio"
-version = "0.4.0"
+version = "0.5.0"
 description = "Descargador de vídeo y música con yt-dlp y spotDL"
 authors = ["Recodio"]
 edition = "2021"
@@ -38,3 +38,5 @@ tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 futures-util = "0.3.33"
 sha2 = "0.11.0"
+base64 = "0.22.1"
+keyring = "4.1.6"

@@ -216,3 +216,24 @@ export interface YoutubeSessionStatus {
   connected: boolean;
   message: string;
 }
+
+export interface SpotifyProfile {
+  id: string;
+  displayName: string;
+  imageUrl: string | null;
+  externalUrl: string | null;
+}
+
+export interface SpotifySessionStatus {
+  connected: boolean;
+  profile: SpotifyProfile | null;
+  message: string;
+}
+
+export interface SpotifyPlaylist {
+  id: string;
+  name: string;
+  imageUrl: string | null;
+  externalUrl: string;
+  itemCount: number;
+}

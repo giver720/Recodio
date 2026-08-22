@@ -4,7 +4,7 @@ Descargador de vídeo y música con una interfaz que no parece un formulario.
 Envuelve **yt-dlp** y **spotDL** con cola paralela, SponsorBlock, detección de
 duplicados y una biblioteca local desde la que abrir los archivos.
 
-> Estado: **v0.1.5 — Windows y Linux**. El port a Android reutilizará este mismo
+> Estado: **v0.5.0 — Windows y Linux**. El port a Android reutilizará este mismo
 > frontend; ver [Android](#android).
 
 ## Qué hace
@@ -12,6 +12,11 @@ duplicados y una biblioteca local desde la que abrir los archivos.
 - **Descarga de todo lo que soporta yt-dlp**, no solo YouTube: Twitch, X, TikTok,
   Vimeo, Instagram, Reddit… más de mil sitios.
 - **Playlists y canales completos** con vista previa marcable elemento a elemento.
+- **Búsqueda directa en YouTube**: escribe título, artista o tema sin buscar y
+  pegar una URL primero.
+- **Cuentas de YouTube y Spotify**: acceso a playlists, canciones guardadas,
+  música más escuchada, historial reciente y feeds personalizados. Spotify usa
+  OAuth PKCE; Recodio nunca guarda la contraseña ni necesita un Client Secret.
 - **Vídeo o solo audio** (MP3, M4A, Opus, FLAC, WAV) con calidad y contenedor
   configurables.
 - **SponsorBlock integrado**: corta patrocinios y autopromoción, o los deja
@@ -56,6 +61,26 @@ acabar estas herramientas, `~/.local/bin` incluida. Mantener la copia propia de
 yt-dlp al día es recomendable: los cambios de YouTube obligan a actualizarla a
 menudo.
 
+## Spotify Web API
+
+La cuenta de Spotify se conecta en la pantalla **Descargar**. El navegador pide
+el consentimiento y vuelve a Recodio mediante este callback local:
+
+```text
+http://127.0.0.1:43821/callback
+```
+
+Ese valor debe figurar exactamente en **Spotify Developer Dashboard › Recodio ›
+Settings › Redirect URIs**. La aplicación usa Authorization Code con PKCE, por
+lo que el Client ID puede formar parte del programa y el Client Secret no debe
+incluirse. El refresh token se guarda en el almacén seguro del sistema (Windows
+Credential Manager, macOS Keychain o Secret Service en Linux), y los access
+tokens se renuevan automáticamente.
+
+Las aplicaciones en modo desarrollo requieren que el propietario tenga Spotify
+Premium y admiten un número limitado de usuarios autorizados. Los usuarios de
+prueba se añaden desde **Settings › Users Management** en el dashboard.
+
 ## Desarrollo
 
 ```bash
@@ -86,6 +111,7 @@ yt-dlp · ffmpeg
 | `src-tauri/src/queue.rs` | Cola con concurrencia, cancelación y eventos de progreso |
 | `src-tauri/src/ytdlp.rs` | Construcción de argumentos y parseo del progreso de yt-dlp |
 | `src-tauri/src/analyze.rs` | Previsualización de enlaces y playlists |
+| `src-tauri/src/spotify.rs` | OAuth PKCE, renovación de sesión y Spotify Web API |
 | `src-tauri/src/db.rs` | Biblioteca en SQLite y detección de duplicados |
 | `src-tauri/src/repair.rs` | Reparación de entradas cruzadas |
 | `src/views/` | Las cuatro pantallas: Descargar, Cola, Biblioteca, Ajustes |
@@ -105,9 +131,10 @@ npm run tauri build -- --bundles deb,appimage
 
 ### Las herramientas de descarga
 
-Recodio no descarga por sí mismo: lanza `yt-dlp`, y `spotDL` para Spotify, con
-`ffmpeg` para unir y convertir. En Windows suelen venir ya instaladas de otras
-cosas; en una instalación limpia de Linux no hay ninguna.
+Recodio no descarga por sí mismo: lanza `yt-dlp`, con `ffmpeg` para unir y
+convertir. `spotDL` se conserva como respaldo opcional para leer enlaces de
+Spotify. En Windows suelen venir ya instaladas de otras cosas; en una
+instalación limpia de Linux no hay ninguna.
 
 **No hace falta instalarlas a mano.** Si faltan, Recodio lo dice nada más abrir
 la pantalla de Descargar y ofrece un botón que se las descarga a su propia

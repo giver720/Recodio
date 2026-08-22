@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FileText,
   Film,
   FolderOpen,
   History,
@@ -15,6 +16,7 @@ import {
   ListChecks,
   ListVideo,
   LogIn,
+  LogOut,
   LoaderCircle,
   Music,
   Play,
@@ -43,7 +45,14 @@ import {
 import { api } from "../lib/api";
 import { duration } from "../lib/format";
 import { useStore } from "../lib/store";
-import type { AnalyzeResult, Entry, Kind, YoutubeSessionStatus } from "../lib/types";
+import type {
+  AnalyzeResult,
+  Entry,
+  Kind,
+  SpotifyPlaylist,
+  SpotifyProfile,
+  YoutubeSessionStatus,
+} from "../lib/types";
 
 const WEB_URL = /^(?:https?:\/\/|www\.)/i;
 
@@ -106,7 +115,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
   const [youtubeStatus, setYoutubeStatus] = useState<YoutubeSessionStatus | null>(null);
   const [checkingYoutube, setCheckingYoutube] = useState(false);
+  const [spotifyProfile, setSpotifyProfile] = useState<SpotifyProfile | null>(null);
+  const [spotifyMessage, setSpotifyMessage] = useState("Conecta tu cuenta para ver tu música de Spotify");
+  const [spotifyPlaylists, setSpotifyPlaylists] = useState<SpotifyPlaylist[]>([]);
+  const [spotifyLoading, setSpotifyLoading] = useState(false);
+  const [showSpotifyPlaylists, setShowSpotifyPlaylists] = useState(false);
   const cookieSpec = settings?.cookiesFromBrowser ?? "";
+  const cookieFile = settings?.cookiesFile ?? "";
+  const cookieFileName = cookieFile.split(/[\\/]/).pop() ?? "cookies.txt";
   const [cookieBrowser = "", ...profileParts] = cookieSpec.split(":");
   const cookieProfile = profileParts.join(":");
 
@@ -140,7 +156,32 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   useEffect(() => {
     // Cambiar de navegador o perfil invalida la comprobación anterior.
     setYoutubeStatus(null);
-  }, [cookieSpec]);
+  }, [cookieSpec, cookieFile]);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .spotifyStatus()
+      .then(async (status) => {
+        if (!active) return;
+        setSpotifyMessage(status.message);
+        setSpotifyProfile(status.profile);
+        if (status.connected) {
+          try {
+            const playlists = await api.spotifyPlaylists();
+            if (active) setSpotifyPlaylists(playlists);
+          } catch {
+            // El perfil sigue siendo útil aunque la lista falle temporalmente.
+          }
+        }
+      })
+      .catch((error) => {
+        if (active) setSpotifyMessage(String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const existingOf = (e: Entry, k: Kind) =>
     k === "audio" ? e.existingAudio : e.existingVideo;
@@ -231,12 +272,27 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
 
   function setYoutubeBrowser(browser: string, profile = cookieProfile) {
     const spec = browser ? `${browser}${profile.trim() ? `:${profile.trim()}` : ""}` : null;
-    saveSettings({ cookiesFromBrowser: spec });
+    saveSettings({ cookiesFromBrowser: spec, cookiesFile: null });
+  }
+
+  async function importYoutubeCookies() {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Cookies de YouTube", extensions: ["txt"] }],
+      });
+      if (typeof picked !== "string") return;
+      const imported = await api.youtubeImportCookies(picked);
+      await saveSettings({ cookiesFromBrowser: null, cookiesFile: imported });
+      toast("success", "Cookies de YouTube importadas; pulsa Comprobar");
+    } catch (e) {
+      toast("error", String(e));
+    }
   }
 
   async function openYoutubeLogin() {
     try {
-      await api.openFolder("https://accounts.google.com/ServiceLogin?service=youtube");
+      await api.youtubeOpenLogin(cookieBrowser || null);
       toast("info", "Inicia sesión en YouTube y vuelve a Recodio cuando termines");
     } catch (e) {
       toast("error", String(e));
@@ -244,14 +300,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   }
 
   async function checkYoutube() {
-    if (!cookieSpec) {
-      toast("info", "Elige el navegador donde tienes abierta tu cuenta de YouTube");
+    if (!cookieSpec && !cookieFile) {
+      toast("info", "Elige un navegador o importa un archivo cookies.txt");
       return;
     }
     setCheckingYoutube(true);
     setYoutubeStatus(null);
     try {
-      const status = await api.youtubeSessionCheck(cookieSpec);
+      const status = await api.youtubeSessionCheck(cookieSpec || null, cookieFile || null);
       setYoutubeStatus(status);
       toast(status.connected ? "success" : "error", status.message);
     } catch (e) {
@@ -260,6 +316,80 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       toast("error", status.message);
     } finally {
       setCheckingYoutube(false);
+    }
+  }
+
+  async function connectSpotify() {
+    setSpotifyLoading(true);
+    setSpotifyMessage("Completa el acceso en tu navegador…");
+    try {
+      const profile = await api.spotifyLogin();
+      setSpotifyProfile(profile);
+      setSpotifyMessage("Sesión de Spotify activa");
+      setSpotifyPlaylists(await api.spotifyPlaylists());
+      toast("success", `Spotify conectado como ${profile.displayName}`);
+    } catch (e) {
+      const message = String(e);
+      setSpotifyMessage(message);
+      toast("error", message);
+    } finally {
+      setSpotifyLoading(false);
+    }
+  }
+
+  async function disconnectSpotify() {
+    try {
+      await api.spotifyLogout();
+      setSpotifyProfile(null);
+      setSpotifyPlaylists([]);
+      setShowSpotifyPlaylists(false);
+      setSpotifyMessage("Conecta tu cuenta para ver tu música de Spotify");
+      toast("success", "Sesión de Spotify cerrada");
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  function showSpotifyResult(next: AnalyzeResult, label: string) {
+    if (next.entries.length === 0) {
+      toast("info", `${label} no contiene canciones disponibles`);
+      return;
+    }
+    setKind("audio");
+    analisisActivo.current = null;
+    setResult(next);
+    setSearchedQuery(label);
+    applyDefaults(next, "audio");
+    setDestDir(null);
+    setFilter("");
+    document.querySelector("[data-download-results]")?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  async function openSpotifyCollection(
+    collection: "saved" | "top" | "recent",
+    label: string,
+  ) {
+    setSpotifyLoading(true);
+    try {
+      showSpotifyResult(await api.spotifyCollection(collection), label);
+    } catch (e) {
+      toast("error", String(e));
+    } finally {
+      setSpotifyLoading(false);
+    }
+  }
+
+  async function openSpotifyPlaylist(playlist: SpotifyPlaylist) {
+    setSpotifyLoading(true);
+    try {
+      showSpotifyResult(await api.spotifyPlaylist(playlist), playlist.name);
+    } catch {
+      // En modo desarrollo Spotify solo entrega el contenido de playlists
+      // propias o colaborativas. Las públicas seguidas aún pueden leerse por
+      // la ruta normal de Recodio.
+      await analyze(false, playlist.externalUrl, playlist.name);
+    } finally {
+      setSpotifyLoading(false);
     }
   }
 
@@ -343,14 +473,16 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
             <p className="text-[13px] font-semibold">
               {youtubeStatus?.connected
                 ? "YouTube conectado"
-                : cookieSpec
+                : cookieSpec || cookieFile
                   ? "Cuenta de YouTube sin comprobar"
                   : "Conecta tu cuenta de YouTube"}
             </p>
             <p className="text-[11.5px] leading-snug text-muted">
               {youtubeStatus
                 ? youtubeStatus.message
-                : cookieSpec
+                : cookieFile
+                  ? `Archivo protegido en Recodio: ${cookieFileName}.`
+                  : cookieSpec
                   ? `Preparado para comprobar ${cookieBrowser}${cookieProfile ? ` · perfil ${cookieProfile}` : ""}.`
                 : "Recodio reutiliza la sesión de tu navegador; nunca pide ni guarda tu contraseña."}
             </p>
@@ -375,7 +507,10 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
           <Button onClick={openYoutubeLogin}>
             <LogIn size={14} /> {cookieSpec ? "Cambiar cuenta" : "Iniciar sesión"}
           </Button>
-          {cookieSpec && (
+          <Button onClick={importYoutubeCookies} title="Alternativa para Brave, Chrome y Edge en Windows">
+            <FileText size={14} /> Importar cookies.txt
+          </Button>
+          {(cookieSpec || cookieFile) && (
             <Button
               variant={youtubeStatus?.connected ? "soft" : "primary"}
               onClick={checkYoutube}
@@ -398,6 +533,118 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
                 <Icon size={14} /> {label}
               </Button>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* ---- Cuenta de Spotify ---- */}
+      <div className="rc-card overflow-hidden">
+        <div className="flex flex-wrap items-center gap-3 p-4">
+          {spotifyProfile?.imageUrl ? (
+            <img
+              src={spotifyProfile.imageUrl}
+              alt=""
+              className="h-10 w-10 shrink-0 rounded-xl object-cover"
+            />
+          ) : (
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#1ed760]/12 text-[#1ed760]">
+              <Music size={19} />
+            </div>
+          )}
+          <div className="min-w-48 flex-1">
+            <p className="text-[13px] font-semibold">
+              {spotifyProfile ? `Spotify · ${spotifyProfile.displayName}` : "Conecta Spotify"}
+            </p>
+            <p className="text-[11.5px] leading-snug text-muted">{spotifyMessage}</p>
+          </div>
+          {spotifyProfile ? (
+            <>
+              {spotifyProfile.externalUrl && (
+                <Button onClick={() => api.openFolder(spotifyProfile.externalUrl!)}>
+                  <ExternalLink size={14} /> Perfil
+                </Button>
+              )}
+              <Button onClick={disconnectSpotify} disabled={spotifyLoading}>
+                <LogOut size={14} /> Cerrar sesión
+              </Button>
+            </>
+          ) : (
+            <Button variant="primary" onClick={connectSpotify} disabled={spotifyLoading}>
+              {spotifyLoading ? (
+                <LoaderCircle size={14} className="animate-spin" />
+              ) : (
+                <LogIn size={14} />
+              )}
+              {spotifyLoading ? "Esperando a Spotify…" : "Iniciar sesión"}
+            </Button>
+          )}
+        </div>
+
+        {spotifyProfile && (
+          <div className="border-t border-line bg-surface2/40 px-4 py-3">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => openSpotifyCollection("saved", "Canciones que te gustan")}
+                disabled={spotifyLoading}
+              >
+                <Heart size={14} /> Me gusta
+              </Button>
+              <Button
+                onClick={() => openSpotifyCollection("top", "Más escuchadas para ti")}
+                disabled={spotifyLoading}
+              >
+                <Sparkles size={14} /> Para ti
+              </Button>
+              <Button
+                onClick={() => openSpotifyCollection("recent", "Escuchado recientemente")}
+                disabled={spotifyLoading}
+              >
+                <History size={14} /> Recientes
+              </Button>
+              <Button
+                variant={showSpotifyPlaylists ? "primary" : "soft"}
+                onClick={() => setShowSpotifyPlaylists((show) => !show)}
+                disabled={spotifyLoading}
+              >
+                <ListVideo size={14} /> Playlists ({spotifyPlaylists.length})
+              </Button>
+              {spotifyLoading && <LoaderCircle size={16} className="m-2 animate-spin text-muted" />}
+            </div>
+
+            {showSpotifyPlaylists && (
+              <div className="mt-3 grid max-h-64 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+                {spotifyPlaylists.map((playlist) => (
+                  <button
+                    key={playlist.id}
+                    onClick={() => openSpotifyPlaylist(playlist)}
+                    className="rc-ring flex min-w-0 items-center gap-2 rounded-xl border border-line bg-surface px-2.5 py-2 text-left transition hover:border-accent/40 hover:bg-surface2"
+                  >
+                    {playlist.imageUrl ? (
+                      <img
+                        src={playlist.imageUrl}
+                        alt=""
+                        className="h-9 w-9 shrink-0 rounded-lg object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#1ed760]/10 text-[#1ed760]">
+                        <ListVideo size={15} />
+                      </div>
+                    )}
+                    <span className="min-w-0">
+                      <span className="block truncate text-[12px] font-medium">{playlist.name}</span>
+                      <span className="block text-[10.5px] text-muted">
+                        {playlist.itemCount} canciones
+                      </span>
+                    </span>
+                  </button>
+                ))}
+                {spotifyPlaylists.length === 0 && (
+                  <p className="col-span-full py-3 text-center text-[12px] text-muted">
+                    Esta cuenta no tiene playlists disponibles.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -485,7 +732,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       )}
 
       {result && (
-        <>
+        <div className="contents" data-download-results>
           {/* ---- Cabecera del resultado ---- */}
           <div className="rc-card overflow-hidden">
             <div className="flex items-start gap-4 p-4">
@@ -497,7 +744,9 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               <div className="min-w-0 flex-1">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-accent2">
                   {searchedQuery
-                    ? `Resultados de YouTube · ${result.entries.length}`
+                    ? result.source === "spotdl"
+                      ? `Spotify · ${result.entries.length} canciones`
+                      : `Resultados de YouTube · ${result.entries.length}`
                     : result.isPlaylist
                     ? `Playlist · ${result.entries.length} elementos`
                     : result.source === "spotdl"
@@ -747,7 +996,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               );
             })}
           </div>
-        </>
+        </div>
       )}
 
       {menu}
