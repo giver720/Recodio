@@ -4,7 +4,7 @@ Descargador de vídeo y música con una interfaz que no parece un formulario.
 Envuelve **yt-dlp** y **spotDL** con cola paralela, SponsorBlock, detección de
 duplicados y una biblioteca local desde la que abrir los archivos.
 
-> Estado: **v0.5.0 — Windows y Linux**. El port a Android reutilizará este mismo
+> Estado: **v0.6.0 — Windows y Linux**. El port a Android reutilizará este mismo
 > frontend; ver [Android](#android).
 
 ## Qué hace
