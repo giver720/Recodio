@@ -23,6 +23,7 @@ use job::Job;
 use queue::{Queue, QueueStats};
 use serde::Deserialize;
 use settings::Settings;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -120,6 +121,126 @@ struct YoutubeSessionStatus {
     message: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct YoutubeAccount {
+    id: String,
+    name: String,
+    cookies_file: PathBuf,
+    created_at: u64,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct YoutubeAccountRegistry {
+    accounts: Vec<YoutubeAccount>,
+}
+
+fn youtube_config_dir(core: &Core) -> CmdResult<&Path> {
+    core.settings_path
+        .parent()
+        .ok_or_else(|| "No se encontró la carpeta de configuración de Recodio".into())
+}
+
+fn youtube_account_name(name: String) -> CmdResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Escribe un nombre para reconocer esta cuenta".into());
+    }
+    if name.chars().count() > 60 || name.chars().any(char::is_control) {
+        return Err("El nombre de la cuenta debe tener entre 1 y 60 caracteres".into());
+    }
+    Ok(name.to_string())
+}
+
+fn validate_youtube_cookies(data: &[u8]) -> CmdResult<()> {
+    const MAX_COOKIE_FILE: usize = 10 * 1024 * 1024;
+    if data.is_empty() || data.len() > MAX_COOKIE_FILE {
+        return Err("El archivo de cookies está vacío o es demasiado grande".into());
+    }
+
+    let text = String::from_utf8_lossy(data);
+    let header = text.lines().next().unwrap_or_default().trim();
+    if header != "# Netscape HTTP Cookie File" && header != "# HTTP Cookie File" {
+        return Err(
+            "El archivo debe estar en formato Netscape cookies.txt (no JSON ni CSV)".into(),
+        );
+    }
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("youtube.com") && !lower.contains("google.com") {
+        return Err("El archivo no contiene cookies de YouTube".into());
+    }
+    Ok(())
+}
+
+fn save_youtube_accounts(core: &Core, registry: &YoutubeAccountRegistry) -> CmdResult<()> {
+    let config_dir = youtube_config_dir(core)?;
+    std::fs::create_dir_all(config_dir).map_err(err)?;
+    let path = config_dir.join("youtube-accounts.json");
+    let temp = config_dir.join("youtube-accounts.json.new");
+    std::fs::write(&temp, serde_json::to_vec_pretty(registry).map_err(err)?).map_err(err)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(err)?;
+    }
+    std::fs::rename(&temp, &path).map_err(err)
+}
+
+fn load_youtube_accounts(core: &Core) -> CmdResult<YoutubeAccountRegistry> {
+    let config_dir = youtube_config_dir(core)?;
+    let path = config_dir.join("youtube-accounts.json");
+    let mut registry = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(err)?;
+        serde_json::from_str(&raw)
+            .map_err(|_| "No se pudo leer la lista de cuentas de YouTube".to_string())?
+    } else {
+        YoutubeAccountRegistry::default()
+    };
+
+    let previous_len = registry.accounts.len();
+    registry
+        .accounts
+        .retain(|account| account.cookies_file.is_file());
+    let mut changed = registry.accounts.len() != previous_len;
+
+    // La versión 0.5.0 guardaba una única cuenta con este nombre. Se registra
+    // automáticamente para que la actualización no obligue a importarla otra vez.
+    let legacy = config_dir.join("youtube-cookies.txt");
+    if legacy.is_file()
+        && !registry
+            .accounts
+            .iter()
+            .any(|account| account.cookies_file == legacy)
+    {
+        let created_at = legacy
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        registry.accounts.push(YoutubeAccount {
+            id: "legacy-import".into(),
+            name: "Cuenta importada".into(),
+            cookies_file: legacy,
+            created_at,
+        });
+        changed = true;
+    }
+
+    registry
+        .accounts
+        .sort_by_key(|account| (account.created_at, account.name.to_ascii_lowercase()));
+    if changed {
+        save_youtube_accounts(core, &registry)?;
+    }
+    Ok(registry)
+}
+
+#[tauri::command]
+fn youtube_accounts_list(state: State<'_, AppState>) -> CmdResult<Vec<YoutubeAccount>> {
+    Ok(load_youtube_accounts(&state.core)?.accounts)
+}
+
 /// Comprueba de verdad que yt-dlp puede leer la cuenta elegida. Guardar el
 /// nombre de un navegador no significa que haya una sesión de YouTube dentro.
 #[tauri::command]
@@ -199,11 +320,15 @@ async fn youtube_session_check(
     })
 }
 
-/// Copia un `cookies.txt` a la carpeta privada de configuración de Recodio.
-/// Guardar una copia evita que la sesión deje de funcionar cuando el usuario
-/// borra el archivo original de Descargas. El contenido nunca vuelve al webview.
+/// Copia un `cookies.txt` a la carpeta privada de la cuenta indicada. Cada
+/// importación usa un archivo diferente, así que cambiar de cuenta no destruye
+/// la sesión que estaba guardada antes. El contenido nunca vuelve al webview.
 #[tauri::command]
-fn youtube_import_cookies(source: PathBuf, state: State<'_, AppState>) -> CmdResult<String> {
+fn youtube_import_cookies(
+    source: PathBuf,
+    name: String,
+    state: State<'_, AppState>,
+) -> CmdResult<YoutubeAccount> {
     const MAX_COOKIE_FILE: u64 = 10 * 1024 * 1024;
 
     let metadata = std::fs::metadata(&source)
@@ -213,26 +338,27 @@ fn youtube_import_cookies(source: PathBuf, state: State<'_, AppState>) -> CmdRes
     }
 
     let data = std::fs::read(&source).map_err(err)?;
-    let text = String::from_utf8_lossy(&data);
-    let header = text.lines().next().unwrap_or_default().trim();
-    if header != "# Netscape HTTP Cookie File" && header != "# HTTP Cookie File" {
-        return Err(
-            "El archivo debe estar en formato Netscape cookies.txt (no JSON ni CSV)".into(),
-        );
-    }
-    let lower = text.to_ascii_lowercase();
-    if !lower.contains("youtube.com") && !lower.contains("google.com") {
-        return Err("El archivo no contiene cookies de YouTube".into());
+    validate_youtube_cookies(&data)?;
+    let name = youtube_account_name(name)?;
+
+    let mut registry = load_youtube_accounts(&state.core)?;
+    if registry
+        .accounts
+        .iter()
+        .any(|account| account.name.eq_ignore_ascii_case(&name))
+    {
+        return Err("Ya existe una cuenta guardada con ese nombre".into());
     }
 
-    let config_dir = state
-        .core
-        .settings_path
-        .parent()
-        .ok_or_else(|| "No se encontró la carpeta de configuración de Recodio".to_string())?;
-    std::fs::create_dir_all(config_dir).map_err(err)?;
-    let dest = config_dir.join("youtube-cookies.txt");
-    let temp = config_dir.join("youtube-cookies.txt.new");
+    let config_dir = youtube_config_dir(&state.core)?;
+    let accounts_dir = config_dir.join("youtube-accounts");
+    std::fs::create_dir_all(&accounts_dir).map_err(err)?;
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(err)?;
+    let id = format!("youtube-{:x}", created_at.as_nanos());
+    let dest = accounts_dir.join(format!("{id}.txt"));
+    let temp = accounts_dir.join(format!("{id}.txt.new"));
     std::fs::write(&temp, data).map_err(err)?;
 
     #[cfg(unix)]
@@ -241,11 +367,78 @@ fn youtube_import_cookies(source: PathBuf, state: State<'_, AppState>) -> CmdRes
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).map_err(err)?;
     }
 
-    if dest.exists() {
-        std::fs::remove_file(&dest).map_err(err)?;
-    }
     std::fs::rename(&temp, &dest).map_err(err)?;
-    Ok(dest.to_string_lossy().into_owned())
+
+    let account = YoutubeAccount {
+        id,
+        name,
+        cookies_file: dest.clone(),
+        created_at: created_at.as_secs(),
+    };
+    registry.accounts.push(account.clone());
+    if let Err(error) = save_youtube_accounts(&state.core, &registry) {
+        let _ = std::fs::remove_file(dest);
+        return Err(error);
+    }
+    Ok(account)
+}
+
+#[tauri::command]
+fn youtube_account_rename(
+    id: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> CmdResult<YoutubeAccount> {
+    let name = youtube_account_name(name)?;
+    let mut registry = load_youtube_accounts(&state.core)?;
+    if registry
+        .accounts
+        .iter()
+        .any(|account| account.id != id && account.name.eq_ignore_ascii_case(&name))
+    {
+        return Err("Ya existe una cuenta guardada con ese nombre".into());
+    }
+    let account = registry
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == id)
+        .ok_or_else(|| "La cuenta de YouTube ya no existe".to_string())?;
+    account.name = name;
+    let updated = account.clone();
+    save_youtube_accounts(&state.core, &registry)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn youtube_account_delete(id: String, state: State<'_, AppState>) -> CmdResult<()> {
+    let mut registry = load_youtube_accounts(&state.core)?;
+    let index = registry
+        .accounts
+        .iter()
+        .position(|account| account.id == id)
+        .ok_or_else(|| "La cuenta de YouTube ya no existe".to_string())?;
+    let account = registry.accounts.remove(index);
+
+    let config_dir = youtube_config_dir(&state.core)?;
+    let managed_dir = config_dir.join("youtube-accounts");
+    let legacy = config_dir.join("youtube-cookies.txt");
+    let managed = account.cookies_file.parent() == Some(managed_dir.as_path())
+        || account.cookies_file == legacy;
+    if !managed {
+        return Err("Recodio se negó a borrar un archivo que no administra".into());
+    }
+    if account.cookies_file.exists() {
+        std::fs::remove_file(&account.cookies_file).map_err(err)?;
+    }
+    save_youtube_accounts(&state.core, &registry)?;
+
+    let active =
+        state.core.settings.read().unwrap().cookies_file.as_ref() == Some(&account.cookies_file);
+    if active {
+        state.core.settings.write().unwrap().cookies_file = None;
+        state.core.save_settings().map_err(err)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -516,11 +709,15 @@ fn enqueue(req: EnqueueRequest, state: State<'_, AppState>) -> CmdResult<usize> 
     std::fs::create_dir_all(&dest).map_err(err)?;
     let dest_str = dest.to_string_lossy().into_owned();
 
+    // En una playlist grande, comprobar cada entrada contra un Vec de miles de
+    // ids era cuadrático. El conjunto mantiene rápida incluso la opción de
+    // sobrescribir una playlist completa.
+    let overwrite_ids: HashSet<String> = req.overwrite_ids.into_iter().collect();
     let jobs: Vec<Job> = req
         .entries
         .into_iter()
         .map(|entry| {
-            let overwrite = req.overwrite_ids.contains(&entry.id);
+            let overwrite = overwrite_ids.contains(&entry.id);
             Job::new(
                 entry,
                 req.kind.clone(),
@@ -561,6 +758,11 @@ fn queue_cancel_all(state: State<'_, AppState>) {
 #[tauri::command]
 fn queue_retry(id: String, state: State<'_, AppState>) {
     state.queue.retry(&id);
+}
+
+#[tauri::command]
+fn queue_retry_failed(state: State<'_, AppState>) -> usize {
+    state.queue.retry_failed()
 }
 
 #[tauri::command]
@@ -1154,7 +1356,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             analyze_url,
             youtube_session_check,
+            youtube_accounts_list,
             youtube_import_cookies,
+            youtube_account_rename,
+            youtube_account_delete,
             youtube_open_login,
             spotify_status,
             spotify_login,
@@ -1168,6 +1373,7 @@ pub fn run() {
             queue_cancel,
             queue_cancel_all,
             queue_retry,
+            queue_retry_failed,
             queue_clear_finished,
             queue_set_paused,
             queue_is_paused,
@@ -1198,4 +1404,64 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar Recodio");
+}
+
+#[cfg(test)]
+mod youtube_account_tests {
+    use super::{
+        load_youtube_accounts, validate_youtube_cookies, youtube_account_name, Core,
+    };
+
+    #[test]
+    fn acepta_cookies_netscape_de_youtube() {
+        let cookies = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n";
+        assert!(validate_youtube_cookies(cookies).is_ok());
+    }
+
+    #[test]
+    fn rechaza_json_y_archivos_de_otro_sitio() {
+        assert!(validate_youtube_cookies(br#"[{"domain":"youtube.com"}]"#).is_err());
+        assert!(validate_youtube_cookies(
+            b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn limpia_y_limita_el_nombre_de_la_cuenta() {
+        assert_eq!(
+            youtube_account_name("  Personal  ".into()).unwrap(),
+            "Personal"
+        );
+        assert!(youtube_account_name("   ".into()).is_err());
+        assert!(youtube_account_name("x".repeat(61)).is_err());
+        assert!(youtube_account_name("Cuenta\nnueva".into()).is_err());
+    }
+
+    #[test]
+    fn migra_una_sola_vez_la_cuenta_de_la_version_anterior() {
+        let root = std::env::temp_dir().join(format!(
+            "recodio-youtube-accounts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let data = root.join("data");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("youtube-cookies.txt"),
+            b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n",
+        )
+        .unwrap();
+        let core = Core::new(data, config.clone()).unwrap();
+
+        let first = load_youtube_accounts(&core).unwrap();
+        let second = load_youtube_accounts(&core).unwrap();
+        assert_eq!(first.accounts.len(), 1);
+        assert_eq!(second.accounts.len(), 1);
+        assert_eq!(second.accounts[0].name, "Cuenta importada");
+        assert!(config.join("youtube-accounts.json").is_file());
+
+        drop(core);
+        std::fs::remove_dir_all(root).ok();
+    }
 }

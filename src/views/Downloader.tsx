@@ -19,7 +19,9 @@ import {
   LogOut,
   LoaderCircle,
   Music,
+  Pencil,
   Play,
+  Plus,
   Radio,
   RotateCcw,
   Search,
@@ -29,7 +31,7 @@ import {
   X,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BlockPicker } from "../components/BlockPicker";
 import { MissingTools } from "../components/MissingTools";
 import { Thumb } from "../components/Thumb";
@@ -51,10 +53,12 @@ import type {
   Kind,
   SpotifyPlaylist,
   SpotifyProfile,
+  YoutubeAccount,
   YoutubeSessionStatus,
 } from "../lib/types";
 
 const WEB_URL = /^(?:https?:\/\/|www\.)/i;
+const RESULT_PAGE_SIZE = 100;
 
 function inputTargets(value: string) {
   const trimmed = value.trim();
@@ -95,6 +99,12 @@ const YOUTUBE_FEEDS = [
   },
 ];
 
+type YoutubeAccountDraft =
+  | { mode: "import"; source: string; name: string }
+  | { mode: "rename"; id: string; name: string };
+
+const normalizedPath = (path: string) => path.replace(/\\/g, "/").toLowerCase();
+
 export function Downloader({ onQueued }: { onQueued: () => void }) {
   const settings = useStore((s) => s.settings);
   const toast = useStore((s) => s.toast);
@@ -112,9 +122,13 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const [destDir, setDestDir] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [blockSize, setBlockSize] = useState(50);
+  const [listPage, setListPage] = useState(0);
+  const [enqueueing, setEnqueueing] = useState(false);
   const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
   const [youtubeStatus, setYoutubeStatus] = useState<YoutubeSessionStatus | null>(null);
   const [checkingYoutube, setCheckingYoutube] = useState(false);
+  const [youtubeAccounts, setYoutubeAccounts] = useState<YoutubeAccount[]>([]);
+  const [youtubeAccountDraft, setYoutubeAccountDraft] = useState<YoutubeAccountDraft | null>(null);
   const [spotifyProfile, setSpotifyProfile] = useState<SpotifyProfile | null>(null);
   const [spotifyMessage, setSpotifyMessage] = useState("Conecta tu cuenta para ver tu música de Spotify");
   const [spotifyPlaylists, setSpotifyPlaylists] = useState<SpotifyPlaylist[]>([]);
@@ -125,25 +139,80 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   const cookieFileName = cookieFile.split(/[\\/]/).pop() ?? "cookies.txt";
   const [cookieBrowser = "", ...profileParts] = cookieSpec.split(":");
   const cookieProfile = profileParts.join(":");
+  const activeYoutubeAccount = youtubeAccounts.find(
+    (account) => normalizedPath(account.cookiesFile) === normalizedPath(cookieFile),
+  );
+  const isEntryDone = useCallback(
+    (entry: Entry) => Boolean(kind === "audio" ? entry.existingAudio : entry.existingVideo),
+    [kind],
+  );
 
   // El análisis en curso, para que los envíos tardíos no se cuelen en otro.
   const analisisActivo = useRef<string | null>(null);
+  const analysisGeneration = useRef(0);
+  const resultRef = useRef<AnalyzeResult | null>(null);
+  const selectionDefaultsRef = useRef({
+    kind,
+    duplicatePolicy: settings?.duplicatePolicy ?? "skip",
+  });
+
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  useEffect(() => {
+    selectionDefaultsRef.current = {
+      kind,
+      duplicatePolicy: settings?.duplicatePolicy ?? "skip",
+    };
+  }, [kind, settings?.duplicatePolicy]);
 
   useEffect(() => {
     const mas = listen<[string, Entry[], boolean]>("analyze-more", (ev) => {
       const [key, nuevas] = ev.payload;
       if (key !== analisisActivo.current) return; // De un análisis ya descartado.
-      setResult((prev) => {
-        if (!prev) return prev;
-        const vistos = new Set(prev.entries.map((e) => e.sourceId));
-        const añadir = nuevas.filter((e) => !vistos.has(e.sourceId));
-        return { ...prev, entries: [...prev.entries, ...añadir], partial: false };
+      const prev = resultRef.current;
+      if (!prev) return;
+      const vistos = new Set(prev.entries.map((e) => e.sourceId));
+      const añadir = nuevas.filter((e) => !vistos.has(e.sourceId));
+      const next = { ...prev, entries: [...prev.entries, ...añadir], partial: false };
+      resultRef.current = next;
+      setResult(next);
+
+      // Las primeras cien pistas ya se marcaban con la política elegida. Las
+      // que llegan por detrás deben seguir la misma regla; de lo contrario una
+      // playlist de 2.000 canciones parecía completa, pero solo descargaba 100.
+      const defaults = selectionDefaultsRef.current;
+      const resultKind: Kind = prev.source === "spotdl" ? "audio" : defaults.kind;
+      setSelected((current) => {
+        const selectedNext = new Set(current);
+        for (const entry of añadir) {
+          if (entry.unavailable) continue;
+          const existing = resultKind === "audio" ? entry.existingAudio : entry.existingVideo;
+          if (!existing || defaults.duplicatePolicy === "overwrite") selectedNext.add(entry.id);
+        }
+        return selectedNext;
       });
+      if (defaults.duplicatePolicy === "overwrite") {
+        setOverwrite((current) => {
+          const overwriteNext = new Set(current);
+          for (const entry of añadir) {
+            const existing = resultKind === "audio" ? entry.existingAudio : entry.existingVideo;
+            if (!entry.unavailable && existing) overwriteNext.add(entry.id);
+          }
+          return overwriteNext;
+        });
+      }
     });
     const fallo = listen<[string, string]>("analyze-failed", (ev) => {
       const [key, mensaje] = ev.payload;
       if (key !== analisisActivo.current) return;
-      setResult((prev) => (prev ? { ...prev, partial: false } : prev));
+      const prev = resultRef.current;
+      if (prev) {
+        const next = { ...prev, partial: false };
+        resultRef.current = next;
+        setResult(next);
+      }
       toast("error", `No se pudo completar la lista: ${mensaje}`);
     });
     return () => {
@@ -157,6 +226,22 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     // Cambiar de navegador o perfil invalida la comprobación anterior.
     setYoutubeStatus(null);
   }, [cookieSpec, cookieFile]);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .youtubeAccounts()
+      .then((accounts) => {
+        if (active) setYoutubeAccounts(accounts);
+      })
+      .catch((error) => {
+        if (active) toast("error", `No se pudieron cargar las cuentas de YouTube: ${error}`);
+      });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -211,6 +296,7 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     value = url,
     feedLabel: string | null = null,
   ) {
+    const generation = ++analysisGeneration.current;
     const parsed = inputTargets(value);
     const targets = feedLabel ? [value] : parsed.targets;
     const query = feedLabel ?? parsed.query;
@@ -218,11 +304,13 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
 
     setAnalyzing(true);
     setStartedAt(Date.now());
+    resultRef.current = null;
     setResult(null);
     try {
       const results: AnalyzeResult[] = [];
       for (const u of targets) {
         results.push(await api.analyzeUrl(u, refresh));
+        if (generation !== analysisGeneration.current) return;
       }
       let merged: AnalyzeResult =
         results.length === 1
@@ -244,15 +332,17 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
       const nextKind: Kind = merged.source === "spotdl" ? "audio" : kind;
       setKind(nextKind);
       analisisActivo.current = merged.key ?? null;
+      resultRef.current = merged;
       setResult(merged);
       setSearchedQuery(query);
       applyDefaults(merged, nextKind);
       setDestDir(null);
       setFilter("");
+      setListPage(0);
     } catch (e) {
-      toast("error", String(e));
+      if (generation === analysisGeneration.current) toast("error", String(e));
     } finally {
-      setAnalyzing(false);
+      if (generation === analysisGeneration.current) setAnalyzing(false);
     }
   }
 
@@ -272,7 +362,8 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
 
   function setYoutubeBrowser(browser: string, profile = cookieProfile) {
     const spec = browser ? `${browser}${profile.trim() ? `:${profile.trim()}` : ""}` : null;
-    saveSettings({ cookiesFromBrowser: spec, cookiesFile: null });
+    void saveSettings({ cookiesFromBrowser: spec, cookiesFile: null });
+    clearYoutubeResult();
   }
 
   async function importYoutubeCookies() {
@@ -282,9 +373,81 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         filters: [{ name: "Cookies de YouTube", extensions: ["txt"] }],
       });
       if (typeof picked !== "string") return;
-      const imported = await api.youtubeImportCookies(picked);
-      await saveSettings({ cookiesFromBrowser: null, cookiesFile: imported });
-      toast("success", "Cookies de YouTube importadas; pulsa Comprobar");
+      let number = youtubeAccounts.length + 1;
+      while (youtubeAccounts.some((account) => account.name === `Cuenta ${number}`)) number += 1;
+      setYoutubeAccountDraft({
+        mode: "import",
+        source: picked,
+        name: `Cuenta ${number}`,
+      });
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  function clearYoutubeResult() {
+    analysisGeneration.current += 1;
+    analisisActivo.current = null;
+    setAnalyzing(false);
+    resultRef.current = null;
+    setResult(null);
+    setSelected(new Set());
+    setSearchedQuery(null);
+    setListPage(0);
+  }
+
+  async function saveYoutubeAccountDraft() {
+    if (!youtubeAccountDraft?.name.trim()) return;
+    try {
+      if (youtubeAccountDraft.mode === "import") {
+        const account = await api.youtubeImportCookies(
+          youtubeAccountDraft.source,
+          youtubeAccountDraft.name,
+        );
+        setYoutubeAccounts((accounts) => [...accounts, account]);
+        await saveSettings({ cookiesFromBrowser: null, cookiesFile: account.cookiesFile });
+        clearYoutubeResult();
+        toast("success", `${account.name} quedó activa; pulsa Comprobar`);
+      } else {
+        const account = await api.youtubeRenameAccount(
+          youtubeAccountDraft.id,
+          youtubeAccountDraft.name,
+        );
+        setYoutubeAccounts((accounts) =>
+          accounts.map((current) => (current.id === account.id ? account : current)),
+        );
+        toast("success", `Cuenta renombrada como ${account.name}`);
+      }
+      setYoutubeAccountDraft(null);
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  async function activateYoutubeAccount(account: YoutubeAccount) {
+    try {
+      await saveSettings({ cookiesFromBrowser: null, cookiesFile: account.cookiesFile });
+      clearYoutubeResult();
+      toast("success", `${account.name} es ahora la cuenta activa; pulsa Comprobar`);
+    } catch (e) {
+      toast("error", String(e));
+    }
+  }
+
+  async function deleteYoutubeAccount(account: YoutubeAccount) {
+    if (!window.confirm(`¿Eliminar «${account.name}» de Recodio?`)) return;
+    try {
+      const wasActive = activeYoutubeAccount?.id === account.id;
+      await api.youtubeDeleteAccount(account.id);
+      setYoutubeAccounts((accounts) => accounts.filter((current) => current.id !== account.id));
+      if (wasActive) {
+        await saveSettings({ cookiesFromBrowser: null, cookiesFile: null });
+        clearYoutubeResult();
+      }
+      if (youtubeAccountDraft?.mode === "rename" && youtubeAccountDraft.id === account.id) {
+        setYoutubeAccountDraft(null);
+      }
+      toast("success", `${account.name} se eliminó de Recodio`);
     } catch (e) {
       toast("error", String(e));
     }
@@ -357,11 +520,13 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
     }
     setKind("audio");
     analisisActivo.current = null;
+    resultRef.current = next;
     setResult(next);
     setSearchedQuery(label);
     applyDefaults(next, "audio");
     setDestDir(null);
     setFilter("");
+    setListPage(0);
     document.querySelector("[data-download-results]")?.scrollIntoView({ behavior: "smooth" });
   }
 
@@ -411,13 +576,17 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
   }
 
   async function start() {
-    if (!result) return;
-    const entries = result.entries.filter((e) => selected.has(e.id));
+    if (!result || enqueueing) return;
+    const entries = result.entries.filter((e) => selected.has(e.id) && !e.unavailable);
     if (entries.length === 0) {
       toast("info", "No hay nada seleccionado");
       return;
     }
+    setEnqueueing(true);
     try {
+      // Deja que React pinte el estado antes de serializar playlists de miles
+      // de canciones para el proceso nativo.
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const n = await api.enqueue({
         entries,
         kind,
@@ -427,12 +596,16 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         overwriteIds: [...overwrite],
       });
       toast("success", `${n} ${n === 1 ? "elemento añadido" : "elementos añadidos"} a la cola`);
+      analisisActivo.current = null;
+      resultRef.current = null;
       setResult(null);
       setUrl("");
       setSearchedQuery(null);
       onQueued();
     } catch (e) {
       toast("error", String(e));
+    } finally {
+      setEnqueueing(false);
     }
   }
 
@@ -446,6 +619,20 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
         (e.uploader ?? "").toLowerCase().includes(q),
     );
   }, [result, filter]);
+
+  const pageCount = Math.max(1, Math.ceil(visible.length / RESULT_PAGE_SIZE));
+  const safePage = Math.min(listPage, pageCount - 1);
+  const pageFrom = safePage * RESULT_PAGE_SIZE;
+  const pageEntries = visible.slice(pageFrom, pageFrom + RESULT_PAGE_SIZE);
+  const selectedDownloadable = useMemo(
+    () =>
+      result?.entries.filter((entry) => selected.has(entry.id) && !entry.unavailable).length ?? 0,
+    [result, selected],
+  );
+
+  useEffect(() => {
+    if (listPage >= pageCount) setListPage(pageCount - 1);
+  }, [listPage, pageCount]);
 
   const duplicates = result
     ? result.entries.filter((e) => existingOf(e, kind)).length
@@ -472,7 +659,9 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
           <div className="min-w-48 flex-1">
             <p className="text-[13px] font-semibold">
               {youtubeStatus?.connected
-                ? "YouTube conectado"
+                ? activeYoutubeAccount
+                  ? `YouTube · ${activeYoutubeAccount.name}`
+                  : "YouTube conectado"
                 : cookieSpec || cookieFile
                   ? "Cuenta de YouTube sin comprobar"
                   : "Conecta tu cuenta de YouTube"}
@@ -480,7 +669,9 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
             <p className="text-[11.5px] leading-snug text-muted">
               {youtubeStatus
                 ? youtubeStatus.message
-                : cookieFile
+                : activeYoutubeAccount
+                  ? `Cuenta activa: ${activeYoutubeAccount.name}.`
+                  : cookieFile
                   ? `Archivo protegido en Recodio: ${cookieFileName}.`
                   : cookieSpec
                   ? `Preparado para comprobar ${cookieBrowser}${cookieProfile ? ` · perfil ${cookieProfile}` : ""}.`
@@ -505,10 +696,10 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
             />
           )}
           <Button onClick={openYoutubeLogin}>
-            <LogIn size={14} /> {cookieSpec ? "Cambiar cuenta" : "Iniciar sesión"}
+            <LogIn size={14} /> {cookieSpec || cookieFile ? "Abrir otra cuenta" : "Iniciar sesión"}
           </Button>
           <Button onClick={importYoutubeCookies} title="Alternativa para Brave, Chrome y Edge en Windows">
-            <FileText size={14} /> Importar cookies.txt
+            <Plus size={14} /> Añadir cuenta
           </Button>
           {(cookieSpec || cookieFile) && (
             <Button
@@ -525,6 +716,92 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
             </Button>
           )}
         </div>
+
+        {(youtubeAccounts.length > 0 || youtubeAccountDraft) && (
+          <div className="border-t border-line bg-surface2/25 px-4 py-3">
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-[12px] font-semibold">Cuentas guardadas</p>
+              <p className="text-[11px] text-muted">
+                Cambiar de cuenta también separa sus recomendados, historial y playlists.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {youtubeAccounts.map((account) => {
+                const active = activeYoutubeAccount?.id === account.id;
+                return (
+                  <div
+                    key={account.id}
+                    className={`flex items-center rounded-xl border transition ${
+                      active
+                        ? "border-accent/55 bg-accent/10 text-ink"
+                        : "border-line bg-surface2 text-muted hover:text-ink"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => activateYoutubeAccount(account)}
+                      disabled={checkingYoutube}
+                      className="rc-ring flex items-center gap-2 rounded-l-xl py-2 pl-3 pr-2 text-[12px] font-medium disabled:opacity-45"
+                      title={`Usar ${account.name}`}
+                    >
+                      {active ? <CheckCircle2 size={14} className="text-accent2" /> : <UserRound size={14} />}
+                      {account.name}
+                    </button>
+                    <IconButton
+                      title={`Renombrar ${account.name}`}
+                      onClick={() =>
+                        setYoutubeAccountDraft({ mode: "rename", id: account.id, name: account.name })
+                      }
+                      className="h-7 w-7"
+                    >
+                      <Pencil size={12} />
+                    </IconButton>
+                    <IconButton
+                      title={`Eliminar ${account.name}`}
+                      onClick={() => deleteYoutubeAccount(account)}
+                      className="mr-1 h-7 w-7 hover:text-bad"
+                    >
+                      <Trash2 size={12} />
+                    </IconButton>
+                  </div>
+                );
+              })}
+            </div>
+
+            {youtubeAccountDraft && (
+              <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-accent/30 bg-accent/8 p-2.5">
+                <FileText size={15} className="ml-1 shrink-0 text-accent2" />
+                <span className="text-[12px] font-medium">
+                  {youtubeAccountDraft.mode === "import" ? "Nombre de la nueva cuenta" : "Nuevo nombre"}
+                </span>
+                <input
+                  autoFocus
+                  value={youtubeAccountDraft.name}
+                  maxLength={60}
+                  onChange={(event) =>
+                    setYoutubeAccountDraft({ ...youtubeAccountDraft, name: event.target.value })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void saveYoutubeAccountDraft();
+                    if (event.key === "Escape") setYoutubeAccountDraft(null);
+                  }}
+                  placeholder="Ej. Personal, Música o Trabajo"
+                  className={`${inputClass} min-w-52 flex-1`}
+                />
+                <Button
+                  variant="primary"
+                  onClick={saveYoutubeAccountDraft}
+                  disabled={!youtubeAccountDraft.name.trim()}
+                >
+                  {youtubeAccountDraft.mode === "import" ? "Guardar y usar" : "Guardar"}
+                </Button>
+                <IconButton title="Cancelar" onClick={() => setYoutubeAccountDraft(null)}>
+                  <X size={14} />
+                </IconButton>
+              </div>
+            )}
+          </div>
+        )}
 
         {youtubeStatus?.connected && (
           <div className="flex flex-wrap gap-2 border-t border-line bg-surface2/40 px-4 py-3">
@@ -767,10 +1044,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
                   </p>
                 )}
               </div>
-              <IconButton title="Descartar" onClick={() => {
+              <IconButton
+                title="Descartar"
+                onClick={() => {
                   analisisActivo.current = null;
+                  resultRef.current = null;
                   setResult(null);
-                }}>
+                }}
+              >
                 <X size={16} />
               </IconButton>
             </div>
@@ -832,9 +1113,20 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
                 </span>
               </button>
 
-              <Button variant="primary" onClick={start} className="ml-auto px-5 py-2.5">
-                <Download size={15} />
-                Descargar {selected.size > 0 && `(${selected.size})`}
+              <Button
+                variant="primary"
+                onClick={start}
+                disabled={enqueueing || selectedDownloadable === 0}
+                className="ml-auto px-5 py-2.5"
+              >
+                {enqueueing ? (
+                  <LoaderCircle size={15} className="animate-spin" />
+                ) : (
+                  <Download size={15} />
+                )}
+                {enqueueing
+                  ? `Añadiendo ${selectedDownloadable}…`
+                  : `Descargar${selectedDownloadable > 0 ? ` (${selectedDownloadable})` : ""}`}
               </Button>
             </div>
           </div>
@@ -846,14 +1138,21 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               size={blockSize}
               onSizeChange={setBlockSize}
               selected={selected}
-              isDone={(e) => Boolean(existingOf(e, kind))}
+              isDone={isEntryDone}
               onToggleBlock={setAll}
             />
           )}
 
           {result.entries.length > 1 && (
             <div className="flex flex-wrap items-center gap-2">
-              <Button onClick={() => setAll(visible.map((e) => e.id), true)}>
+              <Button
+                onClick={() =>
+                  setAll(
+                    visible.filter((entry) => !entry.unavailable).map((entry) => entry.id),
+                    true,
+                  )
+                }
+              >
                 <ListChecks size={14} /> Todos
               </Button>
               <Button onClick={() => setAll(visible.map((e) => e.id), false)}>
@@ -874,15 +1173,57 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
               </Button>
               <input
                 value={filter}
-                onChange={(e) => setFilter(e.target.value)}
+                onChange={(e) => {
+                  setFilter(e.target.value);
+                  setListPage(0);
+                }}
                 placeholder="Filtrar…"
                 className={`${inputClass} ml-auto max-w-56`}
               />
             </div>
           )}
 
+          {visible.length > RESULT_PAGE_SIZE && (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2/45 px-3 py-2 text-[12px] text-muted">
+              <span>
+                Mostrando {pageFrom + 1}–{Math.min(pageFrom + RESULT_PAGE_SIZE, visible.length)} de{" "}
+                {visible.length}
+              </span>
+              <span className="text-[11px] text-muted/80">
+                La selección también incluye las canciones de otras páginas.
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <Button
+                  onClick={() => setListPage((page) => Math.max(0, page - 1))}
+                  disabled={safePage === 0}
+                  className="px-3 py-1.5"
+                >
+                  Anterior
+                </Button>
+                <div className="w-36">
+                  <Select
+                    value={String(safePage)}
+                    onChange={(value) => setListPage(Number(value))}
+                    options={Array.from({ length: pageCount }, (_, page) => {
+                      const from = page * RESULT_PAGE_SIZE + 1;
+                      const to = Math.min((page + 1) * RESULT_PAGE_SIZE, visible.length);
+                      return { value: String(page), label: `${from}–${to}` };
+                    })}
+                  />
+                </div>
+                <Button
+                  onClick={() => setListPage((page) => Math.min(pageCount - 1, page + 1))}
+                  disabled={safePage >= pageCount - 1}
+                  className="px-3 py-1.5"
+                >
+                  Siguiente
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-col gap-1.5 pb-4">
-            {visible.map((entry) => {
+            {pageEntries.map((entry) => {
               const existing = existingOf(entry, kind);
               const isSelected = selected.has(entry.id);
               const willOverwrite = overwrite.has(entry.id);
@@ -938,11 +1279,14 @@ export function Downloader({ onQueued }: { onQueued: () => void }) {
                         label: "Descartar de la lista",
                         icon: <Trash2 size={14} />,
                         danger: true,
-                        onClick: () =>
-                          setResult({
+                        onClick: () => {
+                          const next = {
                             ...result,
                             entries: result.entries.filter((e) => e.id !== entry.id),
-                          }),
+                          };
+                          resultRef.current = next;
+                          setResult(next);
+                        },
                       },
                     ])
                   }

@@ -21,6 +21,7 @@ import type {
   Source,
   SubtitleTrack,
   ToolStatus,
+  YoutubeAccount,
   YoutubeSessionStatus,
 } from "./types";
 
@@ -32,8 +33,13 @@ export const api = {
   youtubeSessionCheck: (browser: string | null, cookiesFile: string | null) =>
     invoke<YoutubeSessionStatus>("youtube_session_check", { browser, cookiesFile }),
 
-  youtubeImportCookies: (source: string) =>
-    invoke<string>("youtube_import_cookies", { source }),
+  youtubeAccounts: () => invoke<YoutubeAccount[]>("youtube_accounts_list"),
+  youtubeImportCookies: (source: string, name: string) =>
+    invoke<YoutubeAccount>("youtube_import_cookies", { source, name }),
+  youtubeRenameAccount: (id: string, name: string) =>
+    invoke<YoutubeAccount>("youtube_account_rename", { id, name }),
+  youtubeDeleteAccount: (id: string) =>
+    invoke<void>("youtube_account_delete", { id }),
   youtubeOpenLogin: (browser: string | null) =>
     invoke<void>("youtube_open_login", { browser }),
 
@@ -74,6 +80,7 @@ export const api = {
   queueCancel: (id: string) => invoke<void>("queue_cancel", { id }),
   queueCancelAll: () => invoke<void>("queue_cancel_all"),
   queueRetry: (id: string) => invoke<void>("queue_retry", { id }),
+  queueRetryFailed: () => invoke<number>("queue_retry_failed"),
   queueClearFinished: () => invoke<void>("queue_clear_finished"),
   queueSetPaused: (paused: boolean) =>
     invoke<void>("queue_set_paused", { paused }),

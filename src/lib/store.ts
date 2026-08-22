@@ -39,6 +39,15 @@ interface State {
 }
 
 let toastSeq = 0;
+// `job-update` llega varias veces por segundo. Buscar el trabajo con findIndex
+// en una cola de miles de canciones hacía que cada avance recorriera la lista
+// completa; este índice conserva la misma operación en tiempo constante.
+const jobPositions = new Map<string, number>();
+
+function rebuildJobPositions(jobs: Job[]) {
+  jobPositions.clear();
+  jobs.forEach((job, index) => jobPositions.set(job.id, index));
+}
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
@@ -60,20 +69,27 @@ export const useStore = create<State>((set, get) => ({
       api.appPlatform(),
       api.toolsStatus(),
     ]);
+    rebuildJobPositions(jobs);
     set({ settings, jobs, stats, platform, tools, ready: true });
 
     listen<Job>("job-update", (e) => {
       const job = e.payload;
       set((s) => {
-        const i = s.jobs.findIndex((j) => j.id === job.id);
-        if (i === -1) return { jobs: [...s.jobs, job] };
+        const i = jobPositions.get(job.id);
+        if (i == null || s.jobs[i]?.id !== job.id) {
+          jobPositions.set(job.id, s.jobs.length);
+          return { jobs: [...s.jobs, job] };
+        }
         const next = s.jobs.slice();
         next[i] = job;
         return { jobs: next };
       });
     });
 
-    listen<Job[]>("queue-replace", (e) => set({ jobs: e.payload }));
+    listen<Job[]>("queue-replace", (e) => {
+      rebuildJobPositions(e.payload);
+      set({ jobs: e.payload });
+    });
     listen<QueueStats>("queue-stats", (e) => set({ stats: e.payload }));
     listen("library-changed", () =>
       set((s) => ({ libraryVersion: s.libraryVersion + 1 })),

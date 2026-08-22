@@ -83,6 +83,36 @@ fn cache_key(url: &str) -> String {
     }
 }
 
+fn account_cache_key(url: &str, settings: &Settings) -> String {
+    let key = cache_key(url);
+    let lower = url.to_ascii_lowercase();
+    let is_youtube = lower.starts_with(":yt")
+        || lower.starts_with("ytsearch")
+        || lower.contains("youtube.com")
+        || lower.contains("youtu.be");
+    if !is_youtube {
+        return key;
+    }
+
+    use std::hash::{Hash, Hasher};
+    let Some(identity) = settings
+        .cookies_file
+        .as_ref()
+        .map(|path| format!("file:{}", path.to_string_lossy()))
+        .or_else(|| {
+            settings
+                .cookies_from_browser
+                .as_ref()
+                .map(|browser| format!("browser:{browser}"))
+        })
+    else {
+        return key;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hasher);
+    format!("{key}#account:{:016x}", hasher.finish())
+}
+
 pub async fn analyze(
     url: &str,
     bins: &Binaries,
@@ -90,7 +120,7 @@ pub async fn analyze(
     settings: &Settings,
     refresh: bool,
 ) -> Result<AnalyzeResult> {
-    let key = cache_key(url);
+    let key = account_cache_key(url, settings);
 
     let mut result = match db.cache_get(&key).filter(|_| !refresh) {
         Some((payload, cached_at)) => match serde_json::from_str::<AnalyzeResult>(&payload) {
@@ -776,6 +806,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn los_feeds_de_youtube_se_guardan_por_cuenta() {
+        let mut primera = Settings::default();
+        primera.cookies_file = Some("C:/Recodio/cuenta-1.txt".into());
+        let mut segunda = primera.clone();
+        segunda.cookies_file = Some("C:/Recodio/cuenta-2.txt".into());
+
+        assert_ne!(
+            account_cache_key(":ytrec", &primera),
+            account_cache_key(":ytrec", &segunda)
+        );
+        assert_ne!(
+            account_cache_key("https://www.youtube.com/watch?v=abc", &primera),
+            account_cache_key("https://www.youtube.com/watch?v=abc", &segunda)
+        );
+        assert_eq!(
+            account_cache_key("https://open.spotify.com/track/abc", &primera),
+            account_cache_key("https://open.spotify.com/track/abc", &segunda)
+        );
+    }
+
     /// Los duplicados dependen de lo que haya en la biblioteca *ahora*. Si se
     /// guardaran con la lista, una canción borrada seguiría figurando como ya
     /// descargada para siempre.
@@ -824,6 +875,13 @@ mod tests {
 
 /// yt-dlp errors are verbose; keep the useful line.
 pub fn clean_ytdlp_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("failed to decrypt with dpapi") {
+        return "Windows no permitió leer las cookies cifradas de Brave/Chrome. Importa un cookies.txt en Recodio y vuelve a intentarlo.".into();
+    }
+    if lower.contains("failed to load cookies") {
+        return "El archivo de cookies no es válido o ya caducó. Expórtalo de nuevo en formato Netscape cookies.txt.".into();
+    }
     let line = raw
         .lines()
         .rev()

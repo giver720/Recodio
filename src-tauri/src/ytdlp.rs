@@ -17,11 +17,13 @@ const PP_TAG: &str = "RCDPP|";
 /// material is reachable at all. Shared with the analyze step so a link that
 /// previews correctly also downloads correctly.
 pub fn apply_access_args(cmd: &mut tokio::process::Command, s: &Settings) {
-    if let Some(browser) = s.cookies_from_browser.as_ref().filter(|b| !b.is_empty()) {
-        cmd.arg("--cookies-from-browser").arg(browser);
-    }
     if let Some(file) = s.cookies_file.as_ref().filter(|p| p.exists()) {
         cmd.arg("--cookies").arg(file);
+    } else if let Some(browser) = s.cookies_from_browser.as_ref().filter(|b| !b.is_empty()) {
+        // Un archivo importado y un navegador nunca deben pasarse juntos. En
+        // Windows, intentar abrir Brave/Chrome además del cookies.txt válido
+        // provoca el error DPAPI y aborta incluso descargas públicas.
+        cmd.arg("--cookies-from-browser").arg(browser);
     }
     if let Some(proxy) = s.proxy.as_ref().filter(|p| !p.is_empty()) {
         cmd.arg("--proxy").arg(proxy);
@@ -31,6 +33,23 @@ pub fn apply_access_args(cmd: &mut tokio::process::Command, s: &Settings) {
     }
     // Geo-restricted material: try harder before giving up.
     cmd.arg("--geo-bypass");
+}
+
+/// Las pistas de Spotify se resuelven mediante una búsqueda pública en YouTube.
+/// Si solo hay cookies directas de Brave/Chrome, es mejor hacer esa búsqueda
+/// sin sesión que perderla por el cifrado DPAPI de Windows. Cuando existe un
+/// cookies.txt importado sí se usa normalmente.
+fn download_access_settings(settings: &Settings, spotify_track: bool) -> Settings {
+    let mut access = settings.clone();
+    if spotify_track
+        && !access
+            .cookies_file
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+    {
+        access.cookies_from_browser = None;
+    }
+    access
 }
 
 fn apply_format_args(cmd: &mut tokio::process::Command, s: &Settings, kind: &str) {
@@ -182,7 +201,8 @@ pub async fn download(
         cmd.arg("--download-archive").arg(archive);
     }
 
-    apply_access_args(&mut cmd, settings);
+    let access_settings = download_access_settings(settings, es_spotify);
+    apply_access_args(&mut cmd, &access_settings);
     apply_format_args(&mut cmd, settings, &job.kind);
     apply_extras_args(&mut cmd, settings, &job.kind);
 
@@ -451,6 +471,51 @@ mod tests {
             crate::analyze::clean_ytdlp_error(&recogido.join("\n")),
             "Video unavailable"
         );
+    }
+
+    #[test]
+    fn spotify_no_intenta_descifrar_brave_sin_un_archivo_importado() {
+        let mut settings = Settings::default();
+        settings.cookies_from_browser = Some("brave".into());
+
+        let access = download_access_settings(&settings, true);
+        assert!(access.cookies_from_browser.is_none());
+
+        let normal = download_access_settings(&settings, false);
+        assert_eq!(normal.cookies_from_browser.as_deref(), Some("brave"));
+    }
+
+    #[test]
+    fn el_archivo_importado_gana_al_navegador() {
+        let cookie_file = std::env::temp_dir().join(format!(
+            "recodio-access-test-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&cookie_file, b"cookies").unwrap();
+        let mut settings = Settings::default();
+        settings.cookies_from_browser = Some("brave".into());
+        settings.cookies_file = Some(cookie_file.clone());
+
+        let mut command = tokio::process::Command::new("yt-dlp");
+        apply_access_args(&mut command, &settings);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.iter().any(|arg| arg == "--cookies"));
+        assert!(!args.iter().any(|arg| arg == "--cookies-from-browser"));
+        std::fs::remove_file(cookie_file).ok();
+    }
+
+    #[test]
+    fn el_error_dpapi_se_explica_en_castellano() {
+        let message = crate::analyze::clean_ytdlp_error(
+            "ERROR: Failed to decrypt with DPAPI. See https://example.invalid",
+        );
+        assert!(message.contains("cookies.txt"));
+        assert!(!message.contains("https://"));
     }
 
     /// Un número suelto no es un mensaje de error. El 2 es el caso real que

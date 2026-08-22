@@ -10,14 +10,18 @@ import {
   PlayCircle,
   RotateCcw,
 } from "lucide-react";
+import { useMemo, useState } from "react";
 import { ProgressBar } from "../components/ProgressBar";
 import { Thumb } from "../components/Thumb";
 import { useMenu } from "../components/Menu";
-import { Button, EmptyState, IconButton } from "../components/ui";
+import { Button, EmptyState, IconButton, Select } from "../components/ui";
 import { api } from "../lib/api";
 import { bytes, duration, eta, speed } from "../lib/format";
 import { useStore } from "../lib/store";
 import type { Job } from "../lib/types";
+
+const QUEUE_PAGE_SIZE = 120;
+type QueueFilter = "all" | "active" | "failed" | "finished";
 
 const statusLabel: Record<Job["status"], string> = {
   queued: "En cola",
@@ -42,11 +46,34 @@ export function QueueView() {
   const stats = useStore((s) => s.stats);
   const toast = useStore((s) => s.toast);
   const { openMenu, menu } = useMenu();
+  const [filter, setFilter] = useState<QueueFilter>("all");
+  const [visibleLimit, setVisibleLimit] = useState(QUEUE_PAGE_SIZE);
 
   // Ni descargando ni esperando: la cola está en reposo aunque tenga historial.
   const idle = stats.running === 0 && stats.queued === 0;
-  const active = jobs.filter((j) => j.status === "running" || j.status === "queued");
-  const finished = jobs.filter((j) => !active.includes(j));
+  const orderedJobs = useMemo(() => {
+    // La implementación anterior usaba `active.includes` por cada trabajo y se
+    // volvía cuadrática con playlists grandes. Una sola pasada conserva el
+    // mismo orden: activos primero y después el historial.
+    const active: Job[] = [];
+    const finished: Job[] = [];
+    for (const job of jobs) {
+      if (job.status === "running" || job.status === "queued") active.push(job);
+      else finished.push(job);
+    }
+    return [...active, ...finished];
+  }, [jobs]);
+  const filteredJobs = useMemo(
+    () =>
+      orderedJobs.filter((job) => {
+        if (filter === "active") return job.status === "running" || job.status === "queued";
+        if (filter === "failed") return job.status === "failed";
+        if (filter === "finished") return job.status !== "running" && job.status !== "queued";
+        return true;
+      }),
+    [orderedJobs, filter],
+  );
+  const visibleJobs = filteredJobs.slice(0, visibleLimit);
 
   if (jobs.length === 0) {
     return (
@@ -106,13 +133,59 @@ export function QueueView() {
               </IconButton>
             </>
           )}
+          {idle && stats.failed > 0 && (
+            <Button
+              variant="primary"
+              onClick={() =>
+                api
+                  .queueRetryFailed()
+                  .then((count) =>
+                    toast(
+                      "success",
+                      count === 1 ? "Reintentando 1 descarga" : `Reintentando ${count} descargas`,
+                    ),
+                  )
+                  .catch((error) => toast("error", String(error)))
+              }
+            >
+              <RotateCcw size={14} /> Reintentar errores
+            </Button>
+          )}
           <IconButton title="Limpiar terminadas" onClick={() => api.queueClearFinished()}>
             <Eraser size={16} />
           </IconButton>
         </div>
       </div>
 
-      {[...active, ...finished].map((job) => (
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2/45 px-3 py-2">
+        <span className="text-[12px] text-muted">
+          Mostrando {visibleJobs.length} de {filteredJobs.length} trabajos
+          {jobs.length !== filteredJobs.length && ` · ${jobs.length} en total`}
+        </span>
+        <div className="ml-auto w-44">
+          <Select
+            value={filter}
+            onChange={(value) => {
+              setFilter(value as QueueFilter);
+              setVisibleLimit(QUEUE_PAGE_SIZE);
+            }}
+            options={[
+              { value: "all", label: "Toda la cola" },
+              { value: "active", label: "En curso" },
+              { value: "failed", label: "Con error" },
+              { value: "finished", label: "Terminadas" },
+            ]}
+          />
+        </div>
+      </div>
+
+      {visibleJobs.length === 0 && (
+        <div className="rc-card px-4 py-8 text-center text-[13px] text-muted">
+          No hay trabajos en este filtro.
+        </div>
+      )}
+
+      {visibleJobs.map((job) => (
         <div
           key={job.id}
           className="rc-card flex items-center gap-3 p-3"
@@ -235,6 +308,15 @@ export function QueueView() {
           </div>
         </div>
       ))}
+
+      {visibleJobs.length < filteredJobs.length && (
+        <Button
+          onClick={() => setVisibleLimit((limit) => limit + QUEUE_PAGE_SIZE)}
+          className="self-center"
+        >
+          Mostrar {Math.min(QUEUE_PAGE_SIZE, filteredJobs.length - visibleJobs.length)} más
+        </Button>
+      )}
 
       {menu}
     </div>

@@ -32,14 +32,18 @@ export function buildBlocks(
   const blocks: Block[] = [];
   for (let i = 0; i < entries.length; i += size) {
     const trozo = entries.slice(i, i + size);
+    const descargables = trozo.filter((e) => !e.unavailable && !isDone(e));
     blocks.push({
       index: blocks.length + 1,
       from: i + 1,
       to: i + trozo.length,
-      ids: trozo.map((e) => e.id),
+      // Una tanda solo marca lo que realmente falta. Antes se incluían también
+      // vídeos privados/no disponibles, que luego terminaban como trabajos
+      // destinados a fallar en playlists grandes.
+      ids: descargables.map((e) => e.id),
       done: trozo.filter(isDone).length,
-      selected: trozo.filter((e) => selected.has(e.id)).length,
-      available: trozo.filter((e) => !e.unavailable && !isDone(e)).length,
+      selected: descargables.filter((e) => selected.has(e.id)).length,
+      available: descargables.length,
     });
   }
   return blocks;

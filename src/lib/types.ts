@@ -217,6 +217,13 @@ export interface YoutubeSessionStatus {
   message: string;
 }
 
+export interface YoutubeAccount {
+  id: string;
+  name: string;
+  cookiesFile: string;
+  createdAt: number;
+}
+
 export interface SpotifyProfile {
   id: string;
   displayName: string;

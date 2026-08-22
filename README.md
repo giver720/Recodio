@@ -12,11 +12,17 @@ duplicados y una biblioteca local desde la que abrir los archivos.
 - **Descarga de todo lo que soporta yt-dlp**, no solo YouTube: Twitch, X, TikTok,
   Vimeo, Instagram, Reddit… más de mil sitios.
 - **Playlists y canales completos** con vista previa marcable elemento a elemento.
+- **Playlists grandes sin bloquear la interfaz**: selección por tandas de 30,
+  50 o 90, vista paginada y filtros de cola para manejar miles de canciones sin
+  montar todas las filas a la vez.
 - **Búsqueda directa en YouTube**: escribe título, artista o tema sin buscar y
   pegar una URL primero.
 - **Cuentas de YouTube y Spotify**: acceso a playlists, canciones guardadas,
   música más escuchada, historial reciente y feeds personalizados. Spotify usa
   OAuth PKCE; Recodio nunca guarda la contraseña ni necesita un Client Secret.
+- **Varias cuentas de YouTube**: importa un `cookies.txt` por cuenta, ponle un
+  nombre y cambia entre ellas sin volver a iniciar sesión. Recomendados,
+  historial, búsquedas privadas y playlists mantienen cachés separadas.
 - **Vídeo o solo audio** (MP3, M4A, Opus, FLAC, WAV) con calidad y contenedor
   configurables.
 - **SponsorBlock integrado**: corta patrocinios y autopromoción, o los deja

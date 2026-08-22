@@ -133,6 +133,28 @@ impl Queue {
         self.inner.wake.notify_one();
     }
 
+    pub fn retry_failed(&self) -> usize {
+        let retried = {
+            let mut jobs = self.inner.jobs.lock().unwrap();
+            let mut retried = 0;
+            for job in jobs.iter_mut().filter(|job| job.status == JobStatus::Failed) {
+                job.status = JobStatus::Queued;
+                job.phase = JobPhase::Waiting;
+                job.progress = -1.0;
+                job.error = None;
+                job.message = None;
+                job.overwrite = true;
+                retried += 1;
+            }
+            retried
+        };
+        if retried > 0 {
+            self.inner.emit_all();
+            self.inner.wake.notify_one();
+        }
+        retried
+    }
+
     /// Drop everything that is not queued or running.
     pub fn clear_finished(&self) {
         {
