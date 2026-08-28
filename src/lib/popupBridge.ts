@@ -17,6 +17,9 @@ function instantanea(): PopupSnapshot {
     playing: p.playing,
     volume: p.volume,
     muted: p.muted,
+    audioBoostEnabled: p.audioBoostEnabled,
+    audioBoostDb: p.audioBoostDb,
+    peakProtection: p.peakProtection,
     rate: p.rate,
     fit: p.fit,
     index: p.index,
@@ -34,6 +37,9 @@ export function usePuenteConPopup() {
   const playing = usePlayer((s) => s.playing);
   const volume = usePlayer((s) => s.volume);
   const muted = usePlayer((s) => s.muted);
+  const audioBoostEnabled = usePlayer((s) => s.audioBoostEnabled);
+  const audioBoostDb = usePlayer((s) => s.audioBoostDb);
+  const peakProtection = usePlayer((s) => s.peakProtection);
   const rate = usePlayer((s) => s.rate);
   const fit = usePlayer((s) => s.fit);
   const seekNonce = usePlayer((s) => s.seekNonce);
@@ -107,6 +113,17 @@ export function usePuenteConPopup() {
   useEffect(() => {
     if (popup) alPopup({ t: "volumen", v: volume, muted });
   }, [popup, volume, muted]);
+
+  useEffect(() => {
+    if (popup) {
+      alPopup({
+        t: "audio-boost",
+        enabled: audioBoostEnabled,
+        db: audioBoostDb,
+        peakProtection,
+      });
+    }
+  }, [popup, audioBoostEnabled, audioBoostDb, peakProtection]);
 
   useEffect(() => {
     if (popup) alPopup({ t: "velocidad", v: rate });

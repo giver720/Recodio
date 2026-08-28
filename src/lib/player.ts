@@ -34,6 +34,10 @@ interface PlayerState {
   duration: number;
   volume: number;
   muted: boolean;
+  /** Ganancia adicional del reproductor interno, independiente del volumen. */
+  audioBoostEnabled: boolean;
+  audioBoostDb: number;
+  peakProtection: boolean;
   rate: number;
   repeat: RepeatMode;
   shuffle: boolean;
@@ -61,6 +65,9 @@ interface PlayerState {
   seek: (seconds: number) => void;
   setVolume: (v: number) => void;
   toggleMute: () => void;
+  setAudioBoostEnabled: (v: boolean) => void;
+  setAudioBoostDb: (db: number) => void;
+  setPeakProtection: (v: boolean) => void;
   setRate: (r: number) => void;
   cycleRepeat: () => void;
   toggleShuffle: () => void;
@@ -99,6 +106,12 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   duration: 0,
   volume: 1,
   muted: false,
+  audioBoostEnabled: localStorage.getItem("recodio.audioBoost.enabled") === "1",
+  audioBoostDb: Math.min(
+    15,
+    Math.max(0, Number(localStorage.getItem("recodio.audioBoost.db") ?? 6) || 0),
+  ),
+  peakProtection: localStorage.getItem("recodio.audioBoost.peakProtection") !== "0",
   rate: 1,
   repeat: "off",
   shuffle: false,
@@ -194,6 +207,22 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     set((s) => ({ position: Math.max(0, seconds), seekNonce: s.seekNonce + 1 })),
   setVolume: (v) => set({ volume: Math.min(1, Math.max(0, v)), muted: false }),
   toggleMute: () => set((s) => ({ muted: !s.muted })),
+  setAudioBoostEnabled: (audioBoostEnabled) => {
+    localStorage.setItem("recodio.audioBoost.enabled", audioBoostEnabled ? "1" : "0");
+    set({ audioBoostEnabled });
+  },
+  setAudioBoostDb: (db) => {
+    const audioBoostDb = Math.min(15, Math.max(0, db));
+    localStorage.setItem("recodio.audioBoost.db", String(audioBoostDb));
+    set({ audioBoostDb });
+  },
+  setPeakProtection: (peakProtection) => {
+    localStorage.setItem(
+      "recodio.audioBoost.peakProtection",
+      peakProtection ? "1" : "0",
+    );
+    set({ peakProtection });
+  },
   setRate: (r) => set({ rate: r }),
   cycleRepeat: () =>
     set((s) => ({

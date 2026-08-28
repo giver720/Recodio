@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/api";
+import { useAudioBoost } from "../lib/audioBoost";
 import { mediaSrc, type FitMode } from "../lib/player";
 import {
   desdePopup,
@@ -31,6 +32,9 @@ const VACIO: PopupSnapshot = {
   playing: false,
   volume: 1,
   muted: false,
+  audioBoostEnabled: false,
+  audioBoostDb: 6,
+  peakProtection: true,
   rate: 1,
   fit: "contain",
   index: 0,
@@ -74,6 +78,14 @@ export function PopupPlayer() {
   const [subActivo, setSubActivo] = useState<string | null>(null);
   const ultimoAviso = useRef(0);
 
+  useAudioBoost(
+    ref,
+    snap.audioBoostEnabled,
+    snap.audioBoostDb,
+    snap.peakProtection,
+    snap.item?.id,
+  );
+
   const ordenar = useCallback((a: OrdenPopup) => desdePopup({ t: "orden", a }), []);
 
   // Escuchar a la principal. Se monta una vez y lee el elemento por referencia,
@@ -97,6 +109,14 @@ export function PopupPlayer() {
           break;
         case "volumen":
           setSnap((s) => ({ ...s, volume: m.v, muted: m.muted }));
+          break;
+        case "audio-boost":
+          setSnap((s) => ({
+            ...s,
+            audioBoostEnabled: m.enabled,
+            audioBoostDb: m.db,
+            peakProtection: m.peakProtection,
+          }));
           break;
         case "velocidad":
           setSnap((s) => ({ ...s, rate: m.v }));

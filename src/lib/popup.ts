@@ -28,6 +28,9 @@ export interface PopupSnapshot {
   playing: boolean;
   volume: number;
   muted: boolean;
+  audioBoostEnabled: boolean;
+  audioBoostDb: number;
+  peakProtection: boolean;
   rate: number;
   fit: FitMode;
   index: number;
@@ -39,6 +42,7 @@ export type MensajeAlPopup =
   | { t: "reproducir"; v: boolean }
   | { t: "saltar"; s: number }
   | { t: "volumen"; v: number; muted: boolean }
+  | { t: "audio-boost"; enabled: boolean; db: number; peakProtection: boolean }
   | { t: "velocidad"; v: number }
   | { t: "encaje"; v: FitMode };
 

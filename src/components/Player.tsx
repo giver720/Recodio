@@ -31,6 +31,7 @@ import {
   type FitMode,
 } from "../lib/player";
 import { api } from "../lib/api";
+import { useAudioBoost } from "../lib/audioBoost";
 import { abrirPopup, cerrarPopup } from "../lib/popup";
 import { usePuenteConPopup } from "../lib/popupBridge";
 import { useStore } from "../lib/store";
@@ -57,6 +58,14 @@ export function Player() {
   const [subtitulos, setSubtitulos] = useState<SubtitleTrack[]>([]);
   const [subActivo, setSubActivo] = useState<string | null>(null);
   const [menuSubs, setMenuSubs] = useState(false);
+
+  useAudioBoost(
+    ref,
+    p.audioBoostEnabled,
+    p.audioBoostDb,
+    p.peakProtection,
+    p.current?.id,
+  );
 
   // El navegador puede salir de pantalla completa por su cuenta (Esc del
   // sistema, cambio de ventana), así que el estado se lee de él, no se supone.
