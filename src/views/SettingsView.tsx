@@ -13,15 +13,13 @@ import {
   Shield,
   Sparkles,
   Terminal,
-  Volume2,
   XCircle,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { UpdateCard } from "../components/UpdateCard";
+import { AudioProPanel } from "../components/AudioProPanel";
 import { Button, Field, Select, Toggle, inputClass } from "../components/ui";
 import { api } from "../lib/api";
-import { MAX_AUDIO_BOOST_DB } from "../lib/audioBoost";
-import { usePlayer } from "../lib/player";
 import { useStore } from "../lib/store";
 import type { PlayerOption, RepairReport, Settings, ToolStatus } from "../lib/types";
 
@@ -45,12 +43,6 @@ export function SettingsView() {
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState("");
   const [repair, setRepair] = useState<RepairReport | null>(null);
-  const audioBoostEnabled = usePlayer((p) => p.audioBoostEnabled);
-  const audioBoostDb = usePlayer((p) => p.audioBoostDb);
-  const peakProtection = usePlayer((p) => p.peakProtection);
-  const setAudioBoostEnabled = usePlayer((p) => p.setAudioBoostEnabled);
-  const setAudioBoostDb = usePlayer((p) => p.setAudioBoostDb);
-  const setPeakProtection = usePlayer((p) => p.setPeakProtection);
 
   const [players, setPlayers] = useState<PlayerOption[]>([]);
 
@@ -134,41 +126,7 @@ export function SettingsView() {
         </Field>
       </Section>
 
-      <Section icon={<Volume2 size={16} />} title="Boost de audio">
-        <Toggle
-          checked={audioBoostEnabled}
-          onChange={setAudioBoostEnabled}
-          label="Amplificación adicional"
-          hint="Aumenta el volumen del reproductor interno por encima del 100 %. No modifica los archivos descargados."
-        />
-        <Field
-          label={`Ganancia: +${audioBoostDb.toFixed(1)} dB`}
-          hint="+6 dB equivale aproximadamente al doble de amplitud. Los niveles altos pueden reducir el rango dinámico."
-        >
-          <input
-            type="range"
-            min={0}
-            max={MAX_AUDIO_BOOST_DB}
-            step={0.5}
-            value={audioBoostDb}
-            disabled={!audioBoostEnabled}
-            onChange={(e) => setAudioBoostDb(Number(e.target.value))}
-            className="w-full accent-[var(--rc-accent)] disabled:cursor-not-allowed disabled:opacity-45"
-            aria-label="Ganancia adicional"
-          />
-          <div className="mt-1 flex justify-between text-[10px] text-muted">
-            <span>0 dB</span>
-            <span>+6 dB</span>
-            <span>+15 dB</span>
-          </div>
-        </Field>
-        <Toggle
-          checked={peakProtection}
-          onChange={setPeakProtection}
-          label="Protección de picos"
-          hint="Limita los picos amplificados para reducir clipping y distorsión. Recomendado."
-        />
-      </Section>
+      <AudioProPanel />
 
       <Section icon={<Gauge size={16} />} title="Descargas">
         <Field label={`Descargas simultáneas: ${s.concurrency}`}>

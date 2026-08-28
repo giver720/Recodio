@@ -1,73 +1,114 @@
 import { useEffect, useRef, type RefObject } from "react";
-
-/** El mismo recorrido que ofrece Vortex. */
-export const MAX_AUDIO_BOOST_DB = 15;
-
-export function dbToGain(db: number): number {
-  const safe = Math.min(MAX_AUDIO_BOOST_DB, Math.max(0, db));
-  return 10 ** (safe / 20);
-}
+import {
+  EQ_FREQUENCIES,
+  buildAudioPlan,
+  classifySignal,
+  type AudioMeterSnapshot,
+  type AudioSettings,
+} from "./audioSettings";
 
 interface AudioGraph {
   context: AudioContext;
-  gain: GainNode;
+  filters: BiquadFilterNode[];
+  boost: GainNode;
   limiter: DynamicsCompressorNode;
+  before: AnalyserNode;
+  after: AnalyserNode;
 }
 
-/**
- * Inserta una etapa de ganancia entre el elemento multimedia y la salida.
- *
- * El volumen normal del reproductor sigue viviendo en `HTMLMediaElement.volume`;
- * este nodo sólo aporta la ganancia adicional. El compresor funciona como
- * protección de picos para que el boost no convierta inmediatamente todo lo que
- * supera 0 dBFS en distorsión digital.
- */
+export function smoothAudioParam(param: AudioParam, value: number, now: number) {
+  param.cancelScheduledValues(now);
+  param.setTargetAtTime(value, now, 0.015);
+}
+
+export function connectAudioNodes(
+  source: AudioNode,
+  filters: AudioNode[],
+  boost: AudioNode,
+  before: AudioNode,
+  limiter: AudioNode,
+  after: AudioNode,
+  destination: AudioNode,
+) {
+  let tail = source;
+  for (const filter of filters) {
+    tail.connect(filter);
+    tail = filter;
+  }
+  tail.connect(boost).connect(before).connect(limiter).connect(after).connect(destination);
+}
+
+function peakDb(analyser: AnalyserNode, buffer: Float32Array<ArrayBuffer>): number {
+  analyser.getFloatTimeDomainData(buffer);
+  let peak = 0;
+  for (const sample of buffer) peak = Math.max(peak, Math.abs(sample));
+  return Math.max(-60, 20 * Math.log10(Math.max(peak, 0.001)));
+}
+
+function createGraph(media: HTMLMediaElement): AudioGraph {
+  const context = new AudioContext();
+  const source = context.createMediaElementSource(media);
+  const filters = EQ_FREQUENCIES.map((frequency) => {
+    const filter = context.createBiquadFilter();
+    filter.type = "peaking";
+    filter.frequency.value = frequency;
+    filter.Q.value = Math.SQRT2;
+    return filter;
+  });
+  const boost = context.createGain();
+  const before = context.createAnalyser();
+  const limiter = context.createDynamicsCompressor();
+  const after = context.createAnalyser();
+  before.fftSize = 512;
+  after.fftSize = 512;
+
+  connectAudioNodes(source, filters, boost, before, limiter, after, context.destination);
+  return { context, filters, boost, limiter, before, after };
+}
+
+/** Procesador completo del elemento multimedia, compartido por audio y vídeo. */
 export function useAudioBoost(
   mediaRef: RefObject<HTMLVideoElement | null>,
-  enabled: boolean,
-  boostDb: number,
-  peakProtection: boolean,
+  settings: AudioSettings,
   mediaId: string | undefined,
+  onMeter?: (meter: AudioMeterSnapshot) => void,
+  onUnavailable?: () => void,
 ) {
   const graph = useRef<AudioGraph | null>(null);
+  const unavailable = useRef(false);
+  const callbacks = useRef({ onMeter, onUnavailable });
+  callbacks.current = { onMeter, onUnavailable };
 
   useEffect(() => {
     const media = mediaRef.current;
-    if (!media || (!enabled && !graph.current)) return;
-
+    if (!media || unavailable.current || (!settings.enabled && !graph.current)) return;
     if (!graph.current) {
       try {
-        const context = new AudioContext();
-        const source = context.createMediaElementSource(media);
-        const gain = context.createGain();
-        const limiter = context.createDynamicsCompressor();
-        source.connect(gain).connect(limiter).connect(context.destination);
-        graph.current = { context, gain, limiter };
+        graph.current = createGraph(media);
       } catch (error) {
-        // Un WebView sin Web Audio debe conservar al menos la reproducción
-        // normal, en lugar de derribar todo el reproductor por el extra.
-        console.error("No se pudo iniciar el boost de audio", error);
+        unavailable.current = true;
+        console.error("No se pudo iniciar Audio Pro", error);
+        callbacks.current.onUnavailable?.();
         return;
       }
     }
 
     const current = graph.current;
+    const plan = buildAudioPlan(settings);
     const now = current.context.currentTime;
-    const target = enabled ? dbToGain(boostDb) : 1;
-    current.gain.gain.cancelScheduledValues(now);
-    current.gain.gain.setTargetAtTime(target, now, 0.015);
+    current.filters.forEach((filter, index) => smoothAudioParam(filter.gain, plan.bands[index], now));
+    smoothAudioParam(current.boost.gain, plan.boostGain, now);
 
-    if (peakProtection) {
-      current.limiter.threshold.setValueAtTime(-1, now);
-      current.limiter.knee.setValueAtTime(0, now);
-      current.limiter.ratio.setValueAtTime(20, now);
-      current.limiter.attack.setValueAtTime(0.003, now);
-      current.limiter.release.setValueAtTime(0.25, now);
+    if (plan.limiterOn) {
+      smoothAudioParam(current.limiter.threshold, -1, now);
+      smoothAudioParam(current.limiter.knee, 0, now);
+      smoothAudioParam(current.limiter.ratio, 20, now);
+      smoothAudioParam(current.limiter.attack, 0.003, now);
+      smoothAudioParam(current.limiter.release, 0.25, now);
     } else {
-      // Ratio 1:1 equivale a pasar limpio sin tener que reconstruir el grafo.
-      current.limiter.threshold.setValueAtTime(0, now);
-      current.limiter.knee.setValueAtTime(0, now);
-      current.limiter.ratio.setValueAtTime(1, now);
+      smoothAudioParam(current.limiter.threshold, 0, now);
+      smoothAudioParam(current.limiter.knee, 0, now);
+      smoothAudioParam(current.limiter.ratio, 1, now);
     }
 
     const despertar = () => {
@@ -80,10 +121,40 @@ export function useAudioBoost(
       media.removeEventListener("play", despertar);
       window.removeEventListener("pointerdown", despertar);
     };
-  }, [mediaRef, enabled, boostDb, peakProtection, mediaId]);
+  }, [mediaRef, settings, mediaId]);
 
-  // No se cierra el contexto en el cleanup: React StrictMode simula un
-  // desmontaje y volvería a intentar enlazar el mismo <video>, algo que Web
-  // Audio prohíbe. La vida del contexto coincide con la de su WebView (la
-  // principal o la flotante), que es quien finalmente libera los recursos.
+  useEffect(() => {
+    const current = graph.current;
+    const media = mediaRef.current;
+    if (!current || !media || !settings.enabled || settings.bypass) {
+      callbacks.current.onMeter?.({ beforeDb: -60, afterDb: -60, reductionDb: 0, risk: "safe", active: false });
+      return;
+    }
+    const beforeBuffer = new Float32Array(current.before.fftSize);
+    const afterBuffer = new Float32Array(current.after.fftSize);
+    let frame = 0;
+    let last = 0;
+    const sample = (time: number) => {
+      if (time - last >= 100 && !media.paused) {
+        last = time;
+        const beforeDb = peakDb(current.before, beforeBuffer);
+        const afterDb = peakDb(current.after, afterBuffer);
+        callbacks.current.onMeter?.({
+          beforeDb,
+          afterDb,
+          reductionDb: Math.abs(current.limiter.reduction),
+          risk: classifySignal(beforeDb),
+          active: true,
+        });
+      }
+      frame = requestAnimationFrame(sample);
+    };
+    frame = requestAnimationFrame(sample);
+    return () => cancelAnimationFrame(frame);
+  }, [mediaRef, settings.enabled, settings.bypass, mediaId]);
+
+  // El contexto vive lo mismo que su WebView. Cerrarlo en el cleanup rompería
+  // React StrictMode, porque un elemento multimedia sólo puede enlazarse una vez.
 }
+
+export { dbToGain, MAX_AUDIO_BOOST_DB } from "./audioSettings";

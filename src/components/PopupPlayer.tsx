@@ -17,6 +17,8 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/api";
 import { useAudioBoost } from "../lib/audioBoost";
+import { DEFAULT_AUDIO_SETTINGS } from "../lib/audioSettings";
+import { AudioQuickControl } from "./AudioQuickControl";
 import { mediaSrc, type FitMode } from "../lib/player";
 import {
   desdePopup,
@@ -32,9 +34,7 @@ const VACIO: PopupSnapshot = {
   playing: false,
   volume: 1,
   muted: false,
-  audioBoostEnabled: false,
-  audioBoostDb: 6,
-  peakProtection: true,
+  audio: DEFAULT_AUDIO_SETTINGS,
   rate: 1,
   fit: "contain",
   index: 0,
@@ -80,10 +80,14 @@ export function PopupPlayer() {
 
   useAudioBoost(
     ref,
-    snap.audioBoostEnabled,
-    snap.audioBoostDb,
-    snap.peakProtection,
+    snap.audio,
     snap.item?.id,
+    (meter) => void desdePopup({ t: "audio-meter", meter }),
+    () => {
+      const audio = { ...snap.audio, enabled: false };
+      setSnap((s) => ({ ...s, audio }));
+      void desdePopup({ t: "audio-settings", settings: audio });
+    },
   );
 
   const ordenar = useCallback((a: OrdenPopup) => desdePopup({ t: "orden", a }), []);
@@ -110,13 +114,8 @@ export function PopupPlayer() {
         case "volumen":
           setSnap((s) => ({ ...s, volume: m.v, muted: m.muted }));
           break;
-        case "audio-boost":
-          setSnap((s) => ({
-            ...s,
-            audioBoostEnabled: m.enabled,
-            audioBoostDb: m.db,
-            peakProtection: m.peakProtection,
-          }));
+        case "audio-settings":
+          setSnap((s) => ({ ...s, audio: m.settings }));
           break;
         case "velocidad":
           setSnap((s) => ({ ...s, rate: m.v }));
@@ -393,6 +392,15 @@ export function PopupPlayer() {
             onChange={(e) => void desdePopup({ t: "volumen", v: Number(e.target.value) })}
             className="h-1 w-14 cursor-pointer accent-[var(--rc-accent)]"
             aria-label="Volumen"
+          />
+          <AudioQuickControl
+            audio={snap.audio}
+            dark
+            onChange={(audio) => {
+              setSnap((s) => ({ ...s, audio }));
+              void desdePopup({ t: "audio-settings", settings: audio });
+            }}
+            onOpenSettings={() => void desdePopup({ t: "abrir-audio" })}
           />
 
           <span className="ml-auto flex items-center gap-0.5">

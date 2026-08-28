@@ -32,6 +32,8 @@ import {
 } from "../lib/player";
 import { api } from "../lib/api";
 import { useAudioBoost } from "../lib/audioBoost";
+import { useAudioMeter } from "../lib/audioMeter";
+import { AudioQuickControl } from "./AudioQuickControl";
 import { abrirPopup, cerrarPopup } from "../lib/popup";
 import { usePuenteConPopup } from "../lib/popupBridge";
 import { useStore } from "../lib/store";
@@ -61,10 +63,21 @@ export function Player() {
 
   useAudioBoost(
     ref,
-    p.audioBoostEnabled,
-    p.audioBoostDb,
-    p.peakProtection,
+    p.audio,
     p.current?.id,
+    useAudioMeter.getState().report,
+    () => {
+      usePlayer.getState().patchAudio({ enabled: false });
+      toast("error", "Audio Pro no está disponible en este reproductor. El audio continuará sin procesar.");
+    },
+  );
+
+  const audioRapido = (
+    <AudioQuickControl
+      audio={p.audio}
+      onChange={p.setAudio}
+      onOpenSettings={() => window.dispatchEvent(new CustomEvent("recodio:abrir-audio"))}
+    />
   );
 
   // El navegador puede salir de pantalla completa por su cuenta (Esc del
@@ -573,6 +586,7 @@ export function Player() {
                   {botonPopup}
                   {botonPantalla}
                   {modoAudio}
+                  {audioRapido}
                   <Velocidad rate={p.rate} onChange={p.setRate} />
                 </>
               )}
@@ -618,6 +632,7 @@ export function Player() {
             <>
               <Velocidad rate={p.rate} onChange={p.setRate} />
               {volumen}
+              {audioRapido}
               {selectorSubs}
               {botonPopup}
               {modoAudio}

@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { FitMode } from "./player";
 import type { LibraryItem } from "./types";
+import type { AudioMeterSnapshot, AudioSettings } from "./audioSettings";
 
 /**
  * Ventana flotante del reproductor.
@@ -28,9 +29,7 @@ export interface PopupSnapshot {
   playing: boolean;
   volume: number;
   muted: boolean;
-  audioBoostEnabled: boolean;
-  audioBoostDb: number;
-  peakProtection: boolean;
+  audio: AudioSettings;
   rate: number;
   fit: FitMode;
   index: number;
@@ -42,7 +41,7 @@ export type MensajeAlPopup =
   | { t: "reproducir"; v: boolean }
   | { t: "saltar"; s: number }
   | { t: "volumen"; v: number; muted: boolean }
-  | { t: "audio-boost"; enabled: boolean; db: number; peakProtection: boolean }
+  | { t: "audio-settings"; settings: AudioSettings }
   | { t: "velocidad"; v: number }
   | { t: "encaje"; v: FitMode };
 
@@ -61,6 +60,9 @@ export type MensajeDesdePopup =
   | { t: "orden"; a: OrdenPopup }
   | { t: "saltar"; s: number }
   | { t: "volumen"; v: number }
+  | { t: "audio-settings"; settings: AudioSettings }
+  | { t: "audio-meter"; meter: AudioMeterSnapshot }
+  | { t: "abrir-audio" }
   | { t: "velocidad"; v: number }
   | { t: "cerrado" };
 

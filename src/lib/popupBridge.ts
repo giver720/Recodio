@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePlayer } from "./player";
+import { useAudioMeter } from "./audioMeter";
 import {
   alPopup,
   cerrarPopup,
@@ -17,9 +18,7 @@ function instantanea(): PopupSnapshot {
     playing: p.playing,
     volume: p.volume,
     muted: p.muted,
-    audioBoostEnabled: p.audioBoostEnabled,
-    audioBoostDb: p.audioBoostDb,
-    peakProtection: p.peakProtection,
+    audio: p.audio,
     rate: p.rate,
     fit: p.fit,
     index: p.index,
@@ -37,9 +36,7 @@ export function usePuenteConPopup() {
   const playing = usePlayer((s) => s.playing);
   const volume = usePlayer((s) => s.volume);
   const muted = usePlayer((s) => s.muted);
-  const audioBoostEnabled = usePlayer((s) => s.audioBoostEnabled);
-  const audioBoostDb = usePlayer((s) => s.audioBoostDb);
-  const peakProtection = usePlayer((s) => s.peakProtection);
+  const audio = usePlayer((s) => s.audio);
   const rate = usePlayer((s) => s.rate);
   const fit = usePlayer((s) => s.fit);
   const seekNonce = usePlayer((s) => s.seekNonce);
@@ -65,6 +62,18 @@ export function usePuenteConPopup() {
           break;
         case "volumen":
           p.setVolume(m.v);
+          break;
+        case "audio-settings":
+          p.setAudio(m.settings);
+          break;
+        case "audio-meter":
+          useAudioMeter.getState().report(m.meter);
+          break;
+        case "abrir-audio":
+          p.setPopup(false);
+          void cerrarPopup();
+          void getCurrentWindow().setFocus();
+          window.dispatchEvent(new CustomEvent("recodio:abrir-audio"));
           break;
         case "velocidad":
           p.setRate(m.v);
@@ -117,13 +126,11 @@ export function usePuenteConPopup() {
   useEffect(() => {
     if (popup) {
       alPopup({
-        t: "audio-boost",
-        enabled: audioBoostEnabled,
-        db: audioBoostDb,
-        peakProtection,
+        t: "audio-settings",
+        settings: audio,
       });
     }
-  }, [popup, audioBoostEnabled, audioBoostDb, peakProtection]);
+  }, [popup, audio]);
 
   useEffect(() => {
     if (popup) alPopup({ t: "velocidad", v: rate });

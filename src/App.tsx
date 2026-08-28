@@ -34,6 +34,19 @@ export default function App() {
     document.documentElement.dataset.theme = theme ?? "dark";
   }, [theme]);
 
+  useEffect(() => {
+    const abrirAudio = () => {
+      setTab("settings");
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() =>
+          document.getElementById("audio-pro")?.scrollIntoView({ behavior: "smooth" }),
+        ),
+      );
+    };
+    window.addEventListener("recodio:abrir-audio", abrirAudio);
+    return () => window.removeEventListener("recodio:abrir-audio", abrirAudio);
+  }, []);
+
   const busy = stats.running + stats.queued;
 
   if (!ready) {
