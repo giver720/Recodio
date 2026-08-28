@@ -27,6 +27,11 @@ pub struct Entry {
     /// True when yt-dlp could not resolve it (private / removed and no mirror).
     #[serde(default)]
     pub unavailable: bool,
+    /// Valores de yt-dlp: `is_live`, `is_upcoming`, `was_live`, `post_live`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +291,16 @@ fn entry_from_ytdlp(v: &Value, index: i64, fallback_extractor: Option<&str>) -> 
         title.as_str(),
         "[Private video]" | "[Deleted video]" | "[Unavailable video]"
     );
+    let live_status = str_field(v, &["live_status"]).or_else(|| {
+        v.get("is_live")
+            .and_then(Value::as_bool)
+            .filter(|value| *value)
+            .map(|_| "is_live".into())
+    });
+    let release_timestamp = v
+        .get("release_timestamp")
+        .or_else(|| v.get("timestamp"))
+        .and_then(Value::as_i64);
 
     Entry {
         id: uuid::Uuid::new_v4().to_string(),
@@ -300,6 +315,8 @@ fn entry_from_ytdlp(v: &Value, index: i64, fallback_extractor: Option<&str>) -> 
         existing_video: None,
         existing_audio: None,
         unavailable,
+        live_status,
+        release_timestamp,
     }
 }
 
@@ -324,11 +341,7 @@ fn spotify_ref(url: &str) -> Option<(String, String)> {
 }
 
 /// Pide el listado de verdad, sin mirar lo guardado.
-async fn analyze_fresh(
-    url: &str,
-    bins: &Binaries,
-    settings: &Settings,
-) -> Result<AnalyzeResult> {
+async fn analyze_fresh(url: &str, bins: &Binaries, settings: &Settings) -> Result<AnalyzeResult> {
     if is_spotify(url) {
         analyze_spotify(url, bins).await
     } else {
@@ -353,11 +366,7 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 /// Puede fallar: el token es el de la sesión anónima del reproductor incrustado y
 /// Spotify limita su uso contra la API pública. Por eso el error se propaga en
 /// lugar de tratarse como lista vacía — arriba se recurre a spotDL.
-async fn playlist_completa(
-    cliente: &reqwest::Client,
-    id: &str,
-    token: &str,
-) -> Result<Vec<Entry>> {
+async fn playlist_completa(cliente: &reqwest::Client, id: &str, token: &str) -> Result<Vec<Entry>> {
     let mut entradas = Vec::new();
     let mut desde = 0usize;
 
@@ -390,8 +399,8 @@ async fn playlist_completa(
                 .pointer("/artists/0/name")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let track_id = str_field(track, &["id"])
-                .unwrap_or_else(|| format!("track-{}", entradas.len()));
+            let track_id =
+                str_field(track, &["id"]).unwrap_or_else(|| format!("track-{}", entradas.len()));
 
             entradas.push(Entry {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -412,6 +421,8 @@ async fn playlist_completa(
                 existing_video: None,
                 existing_audio: None,
                 unavailable: false,
+                live_status: None,
+                release_timestamp: None,
             });
         }
 
@@ -480,12 +491,17 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
                 },
                 url: format!("https://open.spotify.com/track/{id}"),
                 uploader: artist,
-                duration: entity.get("duration").and_then(Value::as_f64).map(|d| d / 1000.0),
+                duration: entity
+                    .get("duration")
+                    .and_then(Value::as_f64)
+                    .map(|d| d / 1000.0),
                 thumbnail: cover,
                 index: 1,
                 existing_video: None,
                 existing_audio: None,
                 unavailable: false,
+                live_status: None,
+                release_timestamp: None,
             }],
             cached_at: None,
             partial: false,
@@ -520,12 +536,17 @@ async fn analyze_spotify_embed(kind: &str, id: &str) -> Result<AnalyzeResult> {
                 },
                 url: format!("https://open.spotify.com/track/{track_id}"),
                 uploader: artist,
-                duration: t.get("duration").and_then(Value::as_f64).map(|d| d / 1000.0),
+                duration: t
+                    .get("duration")
+                    .and_then(Value::as_f64)
+                    .map(|d| d / 1000.0),
                 thumbnail: cover.clone(),
                 index: i as i64 + 1,
                 existing_video: None,
                 existing_audio: None,
                 unavailable: !t.get("isPlayable").and_then(Value::as_bool).unwrap_or(true),
+                live_status: None,
+                release_timestamp: None,
             }
         })
         .collect();
@@ -581,7 +602,9 @@ async fn token_del_embed(cliente: &reqwest::Client, kind: &str, id: &str) -> Res
         .await?;
     const OPEN: &str = r#"<script id="__NEXT_DATA__" type="application/json">"#;
     let start = body.find(OPEN).ok_or_else(|| anyhow!("sin datos"))? + OPEN.len();
-    let end = body[start..].find("</script>").ok_or_else(|| anyhow!("truncado"))?;
+    let end = body[start..]
+        .find("</script>")
+        .ok_or_else(|| anyhow!("truncado"))?;
     let json: Value = serde_json::from_str(&body[start..start + end])?;
     json.pointer("/props/pageProps/state/settings/session/accessToken")
         .and_then(Value::as_str)
@@ -593,7 +616,9 @@ async fn analyze_spotify(url: &str, bins: &Binaries) -> Result<AnalyzeResult> {
     if let Some((kind, id)) = spotify_ref(url) {
         match analyze_spotify_embed(&kind, &id).await {
             Ok(result) => return Ok(result),
-            Err(e) => eprintln!("[recodio] listado rápido de Spotify no disponible ({e}); usando spotdl"),
+            Err(e) => {
+                eprintln!("[recodio] listado rápido de Spotify no disponible ({e}); usando spotdl")
+            }
         }
     }
     analyze_spotdl_cli(url, bins).await
@@ -664,6 +689,8 @@ async fn analyze_spotdl_cli(url: &str, bins: &Binaries) -> Result<AnalyzeResult>
                 existing_video: None,
                 existing_audio: None,
                 unavailable: false,
+                live_status: None,
+                release_timestamp: None,
             }
         })
         .collect();
@@ -827,6 +854,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconoce_directos_y_estrenos_de_youtube() {
+        let estreno = serde_json::json!({
+            "id": "proximo",
+            "title": "Estreno",
+            "url": "https://youtube.com/watch?v=proximo",
+            "live_status": "is_upcoming",
+            "release_timestamp": 2_000_000_000i64
+        });
+        let entry = entry_from_ytdlp(&estreno, 1, Some("youtube"));
+        assert_eq!(entry.live_status.as_deref(), Some("is_upcoming"));
+        assert_eq!(entry.release_timestamp, Some(2_000_000_000));
+
+        let directo = serde_json::json!({
+            "id": "directo",
+            "title": "En vivo",
+            "url": "https://youtube.com/watch?v=directo",
+            "is_live": true
+        });
+        assert_eq!(
+            entry_from_ytdlp(&directo, 1, Some("youtube"))
+                .live_status
+                .as_deref(),
+            Some("is_live")
+        );
+    }
+
     /// Los duplicados dependen de lo que haya en la biblioteca *ahora*. Si se
     /// guardaran con la lista, una canción borrada seguiría figurando como ya
     /// descargada para siempre.
@@ -849,6 +903,8 @@ mod tests {
                 existing_video: Some("C:/algo.mp4".into()),
                 existing_audio: Some("C:/algo.mp3".into()),
                 unavailable: false,
+                live_status: None,
+                release_timestamp: None,
             }],
             cached_at: None,
             partial: false,

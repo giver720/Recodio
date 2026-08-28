@@ -18,11 +18,11 @@ mod ytdlp;
 use crate::core::Core;
 use analyze::{AnalyzeResult, Entry, PlaylistInfo};
 use binaries::ToolStatus;
-use db::{LibraryItem, Playlist};
+use db::{DiscoveredSourceItem, LibraryItem, MediaSource, Playlist, StoredSourceItem};
 use job::Job;
 use queue::{Queue, QueueStats};
-use serde::Deserialize;
-use settings::Settings;
+use serde::{Deserialize, Serialize};
+use settings::{Settings, SourceProfile};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -578,6 +578,8 @@ fn spotify_analyze_result(
             existing_video: None,
             existing_audio: None,
             unavailable: false,
+            live_status: None,
+            release_timestamp: None,
         })
         .collect::<Vec<_>>();
     analyze::marcar_duplicados(&mut entries, &state.core.db, playlist_id.as_deref());
@@ -643,6 +645,473 @@ async fn spotify_playlist(
     Ok(spotify_analyze_result(tracks, name, id, url, &state))
 }
 
+// ----------------------------------------------------------------- fuentes
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaSourceItem {
+    remote_id: String,
+    status: String,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    present: bool,
+    entry: Entry,
+}
+
+const SOURCE_INTERVALS: [i64; 7] = [15, 60, 360, 720, 1440, 4320, 10080];
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaSourcesBackup {
+    version: u32,
+    exported_at: i64,
+    sources: Vec<MediaSource>,
+}
+
+async fn analyze_complete_source(
+    url: &str,
+    core: &Core,
+    profile: Option<&SourceProfile>,
+) -> anyhow::Result<AnalyzeResult> {
+    let mut settings = core.settings.read().unwrap().clone();
+    if let Some(profile) = profile {
+        profile.apply_to(&mut settings);
+    }
+    let mut result = analyze::analyze(url, &core.bins, &core.db, &settings, true).await?;
+    if result.partial {
+        result.entries = analyze::complete_spotify(url, &core.bins).await?;
+        let playlist_id = result
+            .playlist
+            .as_ref()
+            .and_then(|pl| core.db.playlist_id_for(&result.source, &pl.source_id));
+        analyze::marcar_duplicados(&mut result.entries, &core.db, playlist_id.as_deref());
+        result.partial = false;
+    }
+    if !result.is_playlist || result.playlist.is_none() {
+        anyhow::bail!("Las Fuentes deben ser un canal, una playlist, un álbum o una colección; no un elemento individual");
+    }
+    Ok(result)
+}
+
+fn persist_source_result(
+    core: &Core,
+    id: &str,
+    result: &AnalyzeResult,
+) -> anyhow::Result<MediaSource> {
+    let playlist = result.playlist.as_ref().expect("validado antes de guardar");
+    let playlist_id = core.db.playlist_id_for(&result.source, &playlist.source_id);
+    let items: Vec<DiscoveredSourceItem> = result
+        .entries
+        .iter()
+        .map(|entry| DiscoveredSourceItem {
+            extractor: entry.extractor.clone(),
+            remote_id: entry.source_id.clone(),
+            title: entry.title.clone(),
+            url: entry.url.clone(),
+            uploader: entry.uploader.clone(),
+            duration: entry.duration,
+            thumbnail: entry.thumbnail.clone(),
+            position: entry.index,
+            unavailable: entry.unavailable,
+            live_status: entry.live_status.clone(),
+            release_timestamp: entry.release_timestamp,
+            already_downloaded: core
+                .db
+                .find_existing(
+                    &entry.extractor,
+                    &entry.source_id,
+                    "video",
+                    playlist_id.as_deref(),
+                )
+                .is_some()
+                || core
+                    .db
+                    .find_existing(
+                        &entry.extractor,
+                        &entry.source_id,
+                        "audio",
+                        playlist_id.as_deref(),
+                    )
+                    .is_some(),
+        })
+        .collect();
+    core.db.apply_source_discovery(
+        id,
+        &playlist.title,
+        playlist.uploader.as_deref(),
+        playlist.thumbnail.as_deref(),
+        &playlist.source_id,
+        &items,
+    )?;
+    core.db
+        .media_source(id)?
+        .ok_or_else(|| anyhow::anyhow!("La Fuente desapareció mientras se actualizaba"))
+}
+
+#[tauri::command]
+fn media_sources_list(state: State<'_, AppState>) -> CmdResult<Vec<MediaSource>> {
+    state.core.db.list_media_sources().map_err(err)
+}
+
+#[tauri::command]
+async fn media_source_add(
+    url: String,
+    media_kind: String,
+    state: State<'_, AppState>,
+) -> CmdResult<MediaSource> {
+    if !matches!(media_kind.as_str(), "video" | "audio") {
+        return Err("El tipo de descarga de la Fuente no es válido".into());
+    }
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("Pega el enlace de un canal o una playlist".into());
+    }
+    if let Some(existing) = state.core.db.media_source_by_url(&url).map_err(err)? {
+        return Ok(existing);
+    }
+
+    let result = analyze_complete_source(&url, &state.core, None)
+        .await
+        .map_err(err)?;
+    let playlist = result.playlist.as_ref().unwrap();
+    let source = MediaSource {
+        id: uuid::Uuid::new_v4().to_string(),
+        url,
+        source: result.source.clone(),
+        source_id: playlist.source_id.clone(),
+        title: playlist.title.clone(),
+        uploader: playlist.uploader.clone(),
+        thumbnail: playlist.thumbnail.clone(),
+        media_kind,
+        created_at: chrono::Utc::now().timestamp(),
+        last_checked_at: None,
+        last_success_at: None,
+        last_error: None,
+        total_items: 0,
+        new_items: 0,
+        profile: SourceProfile::default(),
+        check_interval_minutes: None,
+        auto_download: false,
+    };
+    let id = state.core.db.upsert_media_source(&source).map_err(err)?;
+    persist_source_result(&state.core, &id, &result).map_err(err)
+}
+
+#[tauri::command]
+async fn media_source_sync(id: String, state: State<'_, AppState>) -> CmdResult<MediaSource> {
+    let source = state
+        .core
+        .db
+        .media_source(&id)
+        .map_err(err)?
+        .ok_or_else(|| "La Fuente ya no existe".to_string())?;
+    match analyze_complete_source(&source.url, &state.core, Some(&source.profile)).await {
+        Ok(result) => persist_source_result(&state.core, &id, &result).map_err(err),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = state.core.db.update_media_source_failure(&id, &message);
+            Err(message)
+        }
+    }
+}
+
+fn source_item_to_entry(
+    core: &Core,
+    source: &MediaSource,
+    item: StoredSourceItem,
+) -> MediaSourceItem {
+    let playlist_id = core.db.playlist_id_for(&source.source, &source.source_id);
+    let existing_video = core
+        .db
+        .find_existing(
+            &item.extractor,
+            &item.remote_id,
+            "video",
+            playlist_id.as_deref(),
+        )
+        .map(|i| i.file_path);
+    let existing_audio = core
+        .db
+        .find_existing(
+            &item.extractor,
+            &item.remote_id,
+            "audio",
+            playlist_id.as_deref(),
+        )
+        .map(|i| i.file_path);
+    let downloaded = if source.media_kind == "audio" {
+        existing_audio.is_some()
+    } else {
+        existing_video.is_some()
+    };
+    let unavailable = item.status == "unavailable" || !item.present;
+    MediaSourceItem {
+        remote_id: item.remote_id.clone(),
+        status: if downloaded {
+            "downloaded".into()
+        } else {
+            item.status
+        },
+        first_seen_at: item.first_seen_at,
+        last_seen_at: item.last_seen_at,
+        present: item.present,
+        entry: Entry {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_id: item.remote_id,
+            extractor: item.extractor,
+            title: item.title,
+            url: item.url,
+            uploader: item.uploader,
+            duration: item.duration,
+            thumbnail: item.thumbnail,
+            index: item.position,
+            existing_video,
+            existing_audio,
+            unavailable,
+            live_status: item.live_status,
+            release_timestamp: item.release_timestamp,
+        },
+    }
+}
+
+#[tauri::command]
+fn media_source_items(id: String, state: State<'_, AppState>) -> CmdResult<Vec<MediaSourceItem>> {
+    let source = state
+        .core
+        .db
+        .media_source(&id)
+        .map_err(err)?
+        .ok_or_else(|| "La Fuente ya no existe".to_string())?;
+    state
+        .core
+        .db
+        .media_source_items(&id)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|item| source_item_to_entry(&state.core, &source, item))
+                .collect()
+        })
+        .map_err(err)
+}
+
+#[tauri::command]
+fn media_source_mark_seen(
+    id: String,
+    remote_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
+    state
+        .core
+        .db
+        .mark_media_source_items_seen(&id, &remote_ids)
+        .map_err(err)
+}
+
+fn valid_profile_choice(value: &Option<String>, choices: &[&str]) -> bool {
+    value
+        .as_deref()
+        .map(|value| choices.contains(&value))
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+fn media_source_update_profile(
+    id: String,
+    media_kind: String,
+    mut profile: SourceProfile,
+    state: State<'_, AppState>,
+) -> CmdResult<MediaSource> {
+    if !matches!(media_kind.as_str(), "video" | "audio") {
+        return Err("El tipo de descarga no es válido".into());
+    }
+    if !valid_profile_choice(
+        &profile.video_quality,
+        &["best", "2160", "1440", "1080", "720", "480", "360"],
+    ) || !valid_profile_choice(
+        &profile.video_container,
+        &["original", "mp4", "mkv", "webm"],
+    ) || !valid_profile_choice(
+        &profile.audio_format,
+        &["mp3", "m4a", "opus", "flac", "wav"],
+    ) || !valid_profile_choice(&profile.audio_bitrate, &["320", "256", "192", "160", "128"])
+    {
+        return Err("El perfil contiene un formato o una calidad no válidos".into());
+    }
+
+    profile.dest_dir = profile.dest_dir.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    profile.subtitle_langs = profile.subtitle_langs.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    if let Some(cookies_file) = &profile.youtube_cookies_file {
+        let known = load_youtube_accounts(&state.core)?
+            .accounts
+            .into_iter()
+            .any(|account| account.cookies_file.to_string_lossy() == cookies_file.as_str());
+        if !known {
+            return Err("La cuenta de YouTube elegida ya no está disponible".into());
+        }
+    }
+
+    state
+        .core
+        .db
+        .update_media_source_profile(&id, &media_kind, &profile)
+        .map_err(err)?;
+    state
+        .core
+        .db
+        .media_source(&id)
+        .map_err(err)?
+        .ok_or_else(|| "La Fuente ya no existe".into())
+}
+
+#[tauri::command]
+fn media_source_update_schedule(
+    id: String,
+    interval_minutes: Option<i64>,
+    auto_download: bool,
+    state: State<'_, AppState>,
+) -> CmdResult<MediaSource> {
+    if interval_minutes
+        .map(|minutes| !SOURCE_INTERVALS.contains(&minutes))
+        .unwrap_or(false)
+    {
+        return Err("El intervalo de comprobación no es válido".into());
+    }
+    if auto_download && interval_minutes.is_none() {
+        return Err("Activa una comprobación periódica antes de descargar automáticamente".into());
+    }
+    state
+        .core
+        .db
+        .update_media_source_schedule(&id, interval_minutes, auto_download)
+        .map_err(err)?;
+    state
+        .core
+        .db
+        .media_source(&id)
+        .map_err(err)?
+        .ok_or_else(|| "La Fuente ya no existe".into())
+}
+
+fn sanitized_sources_backup(mut sources: Vec<MediaSource>) -> MediaSourcesBackup {
+    for source in &mut sources {
+        // Una ruta de cookies identifica una cuenta local y no debe salir en un
+        // respaldo compartible. Al importar se hereda la cuenta activa.
+        source.profile.youtube_cookies_file = None;
+        source.last_error = None;
+    }
+    MediaSourcesBackup {
+        version: 1,
+        exported_at: chrono::Utc::now().timestamp(),
+        sources,
+    }
+}
+
+#[tauri::command]
+fn media_sources_export(path: String, state: State<'_, AppState>) -> CmdResult<usize> {
+    let sources = state.core.db.list_media_sources().map_err(err)?;
+    let count = sources.len();
+    let backup = sanitized_sources_backup(sources);
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&backup).map_err(err)?).map_err(err)?;
+    Ok(count)
+}
+
+#[tauri::command]
+fn media_sources_import(path: String, state: State<'_, AppState>) -> CmdResult<usize> {
+    const MAX_BACKUP_SIZE: u64 = 10 * 1024 * 1024;
+    let path = PathBuf::from(path);
+    let metadata = std::fs::metadata(&path).map_err(err)?;
+    if !metadata.is_file() || metadata.len() > MAX_BACKUP_SIZE {
+        return Err("El respaldo no es un archivo válido o es demasiado grande".into());
+    }
+    let raw = std::fs::read(&path).map_err(err)?;
+    let backup: MediaSourcesBackup = serde_json::from_slice(&raw)
+        .map_err(|_| "El archivo no es un respaldo de Fuentes válido".to_string())?;
+    if backup.version != 1 || backup.sources.len() > 5_000 {
+        return Err("La versión o el tamaño del respaldo no es compatible".into());
+    }
+
+    let mut imported = 0;
+    for mut source in backup.sources {
+        source.url = source.url.trim().to_string();
+        source.title = source.title.trim().to_string();
+        if source.url.is_empty()
+            || source.title.is_empty()
+            || !matches!(source.source.as_str(), "ytdlp" | "spotdl")
+            || !matches!(source.media_kind.as_str(), "video" | "audio")
+            || source
+                .check_interval_minutes
+                .map(|minutes| !SOURCE_INTERVALS.contains(&minutes))
+                .unwrap_or(false)
+            || !valid_profile_choice(
+                &source.profile.video_quality,
+                &["best", "2160", "1440", "1080", "720", "480", "360"],
+            )
+            || !valid_profile_choice(
+                &source.profile.video_container,
+                &["original", "mp4", "mkv", "webm"],
+            )
+            || !valid_profile_choice(
+                &source.profile.audio_format,
+                &["mp3", "m4a", "opus", "flac", "wav"],
+            )
+            || !valid_profile_choice(
+                &source.profile.audio_bitrate,
+                &["320", "256", "192", "160", "128"],
+            )
+        {
+            continue;
+        }
+        source.profile.youtube_cookies_file = None;
+        source.auto_download &= source.check_interval_minutes.is_some();
+
+        let id = if let Some(existing) = state
+            .core
+            .db
+            .media_source_by_url(&source.url)
+            .map_err(err)?
+        {
+            existing.id
+        } else {
+            source.id = uuid::Uuid::new_v4().to_string();
+            source.created_at = chrono::Utc::now().timestamp();
+            source.last_checked_at = None;
+            source.last_success_at = None;
+            source.last_error = None;
+            source.total_items = 0;
+            source.new_items = 0;
+            state.core.db.upsert_media_source(&source).map_err(err)?
+        };
+        state
+            .core
+            .db
+            .update_media_source_profile(&id, &source.media_kind, &source.profile)
+            .map_err(err)?;
+        state
+            .core
+            .db
+            .update_media_source_schedule(&id, source.check_interval_minutes, source.auto_download)
+            .map_err(err)?;
+        imported += 1;
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn media_source_delete(id: String, state: State<'_, AppState>) -> CmdResult<()> {
+    state.core.db.delete_media_source(&id).map_err(err)
+}
+
 // ------------------------------------------------------------------- cola
 
 #[derive(Debug, Deserialize)]
@@ -659,11 +1128,16 @@ struct EnqueueRequest {
     /// Ids de entradas que deben reemplazar el archivo existente.
     #[serde(default)]
     overwrite_ids: Vec<String>,
+    #[serde(default)]
+    profile: Option<SourceProfile>,
 }
 
 #[tauri::command]
 fn enqueue(req: EnqueueRequest, state: State<'_, AppState>) -> CmdResult<usize> {
-    let core = &state.core;
+    enqueue_request(req, &state.core, &state.queue)
+}
+
+fn enqueue_request(req: EnqueueRequest, core: &Core, queue: &Queue) -> CmdResult<usize> {
     let settings = core.settings.read().unwrap().clone();
 
     let base = match req.dest_dir.as_deref().filter(|d| !d.trim().is_empty()) {
@@ -726,13 +1200,103 @@ fn enqueue(req: EnqueueRequest, state: State<'_, AppState>) -> CmdResult<usize> 
                 overwrite,
                 playlist_id.clone(),
                 playlist_title.clone(),
+                req.profile.clone(),
             )
         })
         .collect();
 
     let count = jobs.len();
-    state.queue.add(jobs);
+    queue.add(jobs);
     Ok(count)
+}
+
+fn source_check_due(source: &MediaSource, now: i64) -> bool {
+    source
+        .check_interval_minutes
+        .filter(|minutes| *minutes > 0)
+        .map(|minutes| {
+            let previous = source.last_checked_at.unwrap_or(source.created_at);
+            previous.saturating_add(minutes.saturating_mul(60)) <= now
+        })
+        .unwrap_or(false)
+}
+
+async fn run_scheduled_source(
+    source: MediaSource,
+    core: &Core,
+    queue: &Queue,
+) -> anyhow::Result<usize> {
+    let result = analyze_complete_source(&source.url, core, Some(&source.profile)).await?;
+    let updated = persist_source_result(core, &source.id, &result)?;
+    if !updated.auto_download {
+        return Ok(0);
+    }
+
+    let candidates: Vec<MediaSourceItem> = core
+        .db
+        .media_source_items(&updated.id)?
+        .into_iter()
+        .map(|item| source_item_to_entry(core, &updated, item))
+        .filter(|item| {
+            item.status == "new"
+                && item.present
+                && !item.entry.unavailable
+                && item.entry.live_status.as_deref() != Some("is_upcoming")
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let remote_ids: Vec<String> = candidates
+        .iter()
+        .map(|item| item.remote_id.clone())
+        .collect();
+    let request = EnqueueRequest {
+        entries: candidates.into_iter().map(|item| item.entry).collect(),
+        kind: updated.media_kind.clone(),
+        source: updated.source.clone(),
+        dest_dir: updated.profile.dest_dir.clone(),
+        playlist: Some(PlaylistInfo {
+            source_id: updated.source_id.clone(),
+            title: updated.title.clone(),
+            url: updated.url.clone(),
+            uploader: updated.uploader.clone(),
+            thumbnail: updated.thumbnail.clone(),
+        }),
+        overwrite_ids: Vec::new(),
+        profile: Some(updated.profile.clone()),
+    };
+    let count = enqueue_request(request, core, queue).map_err(anyhow::Error::msg)?;
+    core.db
+        .mark_media_source_items_seen(&updated.id, &remote_ids)?;
+    Ok(count)
+}
+
+async fn source_scheduler(core: Arc<Core>, queue: Queue, app: tauri::AppHandle) {
+    use tauri::Emitter;
+
+    // Da tiempo a que abra la ventana y a que termine el rastreo inicial.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    loop {
+        let now = chrono::Utc::now().timestamp();
+        let due = core
+            .db
+            .list_media_sources()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|source| source_check_due(source, now))
+            .collect::<Vec<_>>();
+
+        for source in due {
+            let id = source.id.clone();
+            if let Err(error) = run_scheduled_source(source, &core, &queue).await {
+                let _ = core.db.update_media_source_failure(&id, &error.to_string());
+            }
+            let _ = app.emit("media-sources-changed", id);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
 }
 
 #[tauri::command]
@@ -1325,6 +1889,12 @@ pub fn run() {
             let core = Arc::new(Core::new(data_dir, config_dir)?);
             let queue = Queue::new(core.clone(), app.handle().clone());
 
+            tauri::async_runtime::spawn(source_scheduler(
+                core.clone(),
+                queue.clone(),
+                app.handle().clone(),
+            ));
+
             // Rastreo de arranque: lo que haya aparecido en las carpetas desde
             // la última vez entra solo. Va en un hilo aparte para no retrasar la
             // ventana, y solo avisa si de verdad ha encontrado algo.
@@ -1367,6 +1937,16 @@ pub fn run() {
             spotify_playlists,
             spotify_collection,
             spotify_playlist,
+            media_sources_list,
+            media_source_add,
+            media_source_sync,
+            media_source_items,
+            media_source_mark_seen,
+            media_source_update_profile,
+            media_source_update_schedule,
+            media_sources_export,
+            media_sources_import,
+            media_source_delete,
             enqueue,
             queue_list,
             queue_stats,
@@ -1407,10 +1987,92 @@ pub fn run() {
 }
 
 #[cfg(test)]
-mod youtube_account_tests {
+mod source_scheduler_tests {
     use super::{
-        load_youtube_accounts, validate_youtube_cookies, youtube_account_name, Core,
+        sanitized_sources_backup, source_check_due, source_item_to_entry, Core,
+        DiscoveredSourceItem, MediaSource, SourceProfile,
     };
+
+    fn source(interval: Option<i64>, last_checked_at: Option<i64>) -> MediaSource {
+        MediaSource {
+            id: "fuente".into(),
+            url: "https://example.com/lista".into(),
+            source: "ytdlp".into(),
+            source_id: "lista".into(),
+            title: "Lista".into(),
+            uploader: None,
+            thumbnail: None,
+            media_kind: "video".into(),
+            created_at: 1_000,
+            last_checked_at,
+            last_success_at: None,
+            last_error: None,
+            total_items: 0,
+            new_items: 0,
+            profile: SourceProfile::default(),
+            check_interval_minutes: interval,
+            auto_download: false,
+        }
+    }
+
+    #[test]
+    fn solo_las_fuentes_vencidas_entran_en_el_programador() {
+        assert!(!source_check_due(&source(None, None), 100_000));
+        assert!(!source_check_due(&source(Some(60), Some(10_000)), 13_599));
+        assert!(source_check_due(&source(Some(60), Some(10_000)), 13_600));
+    }
+
+    #[test]
+    fn el_respaldo_no_exporta_la_cuenta_de_youtube() {
+        let mut value = source(Some(60), None);
+        value.profile.youtube_cookies_file = Some("C:/secreto/cookies.txt".into());
+        let backup = sanitized_sources_backup(vec![value]);
+        assert!(backup.sources[0].profile.youtube_cookies_file.is_none());
+    }
+
+    #[test]
+    fn un_estreno_guardado_llega_serializado_a_la_interfaz() {
+        let root = std::env::temp_dir().join(format!("recodio-live-{}", uuid::Uuid::new_v4()));
+        let core = Core::new(root.join("data"), root.join("config")).unwrap();
+        let value = source(None, None);
+        core.db.upsert_media_source(&value).unwrap();
+        core.db
+            .apply_source_discovery(
+                &value.id,
+                &value.title,
+                None,
+                None,
+                &value.source_id,
+                &[DiscoveredSourceItem {
+                    extractor: "youtube".into(),
+                    remote_id: "estreno".into(),
+                    title: "Estreno".into(),
+                    url: "https://youtube.com/watch?v=estreno".into(),
+                    uploader: None,
+                    duration: None,
+                    thumbnail: None,
+                    position: 1,
+                    unavailable: false,
+                    live_status: Some("is_upcoming".into()),
+                    release_timestamp: Some(2_000_000_000),
+                    already_downloaded: false,
+                }],
+            )
+            .unwrap();
+        let stored = core.db.media_source_items(&value.id).unwrap().remove(0);
+        let frontend = source_item_to_entry(&core, &value, stored);
+        let json = serde_json::to_value(frontend).unwrap();
+        assert_eq!(
+            json.pointer("/entry/liveStatus").and_then(|v| v.as_str()),
+            Some("is_upcoming")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod youtube_account_tests {
+    use super::{load_youtube_accounts, validate_youtube_cookies, youtube_account_name, Core};
 
     #[test]
     fn acepta_cookies_netscape_de_youtube() {
@@ -1440,10 +2102,8 @@ mod youtube_account_tests {
 
     #[test]
     fn migra_una_sola_vez_la_cuenta_de_la_version_anterior() {
-        let root = std::env::temp_dir().join(format!(
-            "recodio-youtube-accounts-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("recodio-youtube-accounts-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let config = root.join("config");
         std::fs::create_dir_all(&config).unwrap();

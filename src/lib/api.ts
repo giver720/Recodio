@@ -5,6 +5,8 @@ import type {
   Job,
   Kind,
   LibraryItem,
+  MediaSource,
+  MediaSourceItem,
   ImportReport,
   Platform,
   PlayerOption,
@@ -19,6 +21,7 @@ import type {
   SpotifyProfile,
   SpotifySessionStatus,
   Source,
+  SourceProfile,
   SubtitleTrack,
   ToolStatus,
   YoutubeAccount,
@@ -56,6 +59,24 @@ export const api = {
       url: playlist.externalUrl,
     }),
 
+  mediaSources: () => invoke<MediaSource[]>("media_sources_list"),
+  mediaSourceAdd: (url: string, mediaKind: Kind) =>
+    invoke<MediaSource>("media_source_add", { url, mediaKind }),
+  mediaSourceSync: (id: string) =>
+    invoke<MediaSource>("media_source_sync", { id }),
+  mediaSourceItems: (id: string) =>
+    invoke<MediaSourceItem[]>("media_source_items", { id }),
+  mediaSourceMarkSeen: (id: string, remoteIds: string[]) =>
+    invoke<void>("media_source_mark_seen", { id, remoteIds }),
+  mediaSourceUpdateProfile: (id: string, mediaKind: Kind, profile: SourceProfile) =>
+    invoke<MediaSource>("media_source_update_profile", { id, mediaKind, profile }),
+  mediaSourceUpdateSchedule: (id: string, intervalMinutes: number | null, autoDownload: boolean) =>
+    invoke<MediaSource>("media_source_update_schedule", { id, intervalMinutes, autoDownload }),
+  mediaSourcesExport: (path: string) => invoke<number>("media_sources_export", { path }),
+  mediaSourcesImport: (path: string) => invoke<number>("media_sources_import", { path }),
+  mediaSourceDelete: (id: string) =>
+    invoke<void>("media_source_delete", { id }),
+
   enqueue: (req: {
     entries: Entry[];
     kind: Kind;
@@ -63,6 +84,7 @@ export const api = {
     destDir?: string | null;
     playlist?: PlaylistInfo | null;
     overwriteIds?: string[];
+    profile?: SourceProfile | null;
   }) =>
     invoke<number>("enqueue", {
       req: {
@@ -72,6 +94,7 @@ export const api = {
         destDir: req.destDir ?? null,
         playlist: req.playlist ?? null,
         overwriteIds: req.overwriteIds ?? [],
+        profile: req.profile ?? null,
       },
     }),
 

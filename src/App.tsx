@@ -1,4 +1,4 @@
-import { Download, Library as LibraryIcon, ListVideo, Settings2 } from "lucide-react";
+import { Download, Library as LibraryIcon, ListVideo, Rss, Settings2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Mark } from "./components/Mark";
 import { ProgressBar } from "./components/ProgressBar";
@@ -9,11 +9,13 @@ import { Player } from "./components/Player";
 import { Library } from "./views/Library";
 import { QueueView } from "./views/QueueView";
 import { SettingsView } from "./views/SettingsView";
+import { SourcesView } from "./views/SourcesView";
 
-type Tab = "download" | "queue" | "library" | "settings";
+type Tab = "download" | "sources" | "queue" | "library" | "settings";
 
 const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
   { id: "download", label: "Descargar", icon: <Download size={17} /> },
+  { id: "sources", label: "Fuentes", icon: <Rss size={17} /> },
   { id: "queue", label: "Cola", icon: <ListVideo size={17} /> },
   { id: "library", label: "Biblioteca", icon: <LibraryIcon size={17} /> },
   { id: "settings", label: "Ajustes", icon: <Settings2 size={17} /> },
@@ -122,6 +124,7 @@ export default function App() {
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div key={tab} className="rc-fade-in h-full">
             {tab === "download" && <Downloader onQueued={() => setTab("queue")} />}
+            {tab === "sources" && <SourcesView onQueued={() => setTab("queue")} />}
             {tab === "queue" && <QueueView />}
             {tab === "library" && <Library />}
             {tab === "settings" && <SettingsView />}

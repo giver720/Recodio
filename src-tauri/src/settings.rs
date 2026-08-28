@@ -106,6 +106,60 @@ pub struct Settings {
     pub theme: String,
 }
 
+/// Ajustes opcionales propios de una Fuente. `None` significa «heredar el
+/// ajuste general», de modo que los perfiles antiguos y los recién creados no
+/// cambian el comportamiento hasta que el usuario elige algo explícitamente.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SourceProfile {
+    pub dest_dir: Option<String>,
+    pub video_quality: Option<String>,
+    pub video_container: Option<String>,
+    pub audio_format: Option<String>,
+    pub audio_bitrate: Option<String>,
+    pub sponsorblock: Option<bool>,
+    pub write_subtitles: Option<bool>,
+    pub embed_subtitles: Option<bool>,
+    pub subtitle_langs: Option<String>,
+    /// Ruta de la cuenta importada elegida para esta Fuente.
+    pub youtube_cookies_file: Option<String>,
+}
+
+impl SourceProfile {
+    /// Mezcla sólo los valores expresos y conserva el resto de la configuración
+    /// general. Esta misma instantánea viaja dentro del trabajo en cola.
+    pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(value) = &self.video_quality {
+            settings.video_quality = value.clone();
+        }
+        if let Some(value) = &self.video_container {
+            settings.video_container = value.clone();
+        }
+        if let Some(value) = &self.audio_format {
+            settings.audio_format = value.clone();
+        }
+        if let Some(value) = &self.audio_bitrate {
+            settings.audio_bitrate = value.clone();
+        }
+        if let Some(value) = self.sponsorblock {
+            settings.sponsorblock = value;
+        }
+        if let Some(value) = self.write_subtitles {
+            settings.write_subtitles = value;
+        }
+        if let Some(value) = self.embed_subtitles {
+            settings.embed_subtitles = value;
+        }
+        if let Some(value) = &self.subtitle_langs {
+            settings.subtitle_langs = value.clone();
+        }
+        if let Some(value) = &self.youtube_cookies_file {
+            settings.cookies_file = Some(PathBuf::from(value));
+            settings.cookies_from_browser = None;
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -116,11 +170,7 @@ impl Default for Settings {
             duplicate_policy: DuplicatePolicy::Skip,
 
             sponsorblock: true,
-            sponsorblock_remove: vec![
-                "sponsor".into(),
-                "selfpromo".into(),
-                "interaction".into(),
-            ],
+            sponsorblock_remove: vec!["sponsor".into(), "selfpromo".into(), "interaction".into()],
             sponsorblock_mark: vec!["intro".into(), "outro".into(), "preview".into()],
 
             video_quality: "best".into(),
@@ -192,5 +242,47 @@ impl Settings {
         }
         std::fs::write(path, serde_json::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Settings, SourceProfile};
+
+    #[test]
+    fn un_perfil_solo_sobrescribe_lo_que_declara() {
+        let mut settings = Settings::default();
+        settings.video_quality = "720".into();
+        settings.audio_format = "mp3".into();
+        settings.sponsorblock = true;
+
+        SourceProfile {
+            video_quality: Some("1080".into()),
+            sponsorblock: Some(false),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+
+        assert_eq!(settings.video_quality, "1080");
+        assert_eq!(settings.audio_format, "mp3");
+        assert!(!settings.sponsorblock);
+    }
+
+    #[test]
+    fn una_cuenta_de_fuente_reemplaza_el_navegador_global() {
+        let mut settings = Settings::default();
+        settings.cookies_from_browser = Some("brave".into());
+
+        SourceProfile {
+            youtube_cookies_file: Some("cuenta.txt".into()),
+            ..Default::default()
+        }
+        .apply_to(&mut settings);
+
+        assert_eq!(
+            settings.cookies_file.unwrap().to_string_lossy(),
+            "cuenta.txt"
+        );
+        assert!(settings.cookies_from_browser.is_none());
     }
 }

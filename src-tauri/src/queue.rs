@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 /// cannot flood the webview.
 const EMIT_INTERVAL: Duration = Duration::from_millis(120);
 
+#[derive(Clone)]
 pub struct Queue {
     inner: Arc<Inner>,
 }
@@ -137,7 +138,10 @@ impl Queue {
         let retried = {
             let mut jobs = self.inner.jobs.lock().unwrap();
             let mut retried = 0;
-            for job in jobs.iter_mut().filter(|job| job.status == JobStatus::Failed) {
+            for job in jobs
+                .iter_mut()
+                .filter(|job| job.status == JobStatus::Failed)
+            {
                 job.status = JobStatus::Queued;
                 job.phase = JobPhase::Waiting;
                 job.progress = -1.0;
@@ -238,7 +242,10 @@ impl Inner {
             }
         }
 
-        let settings = self.core.settings.read().unwrap().clone();
+        let mut settings = self.core.settings.read().unwrap().clone();
+        if let Some(profile) = &job.profile {
+            profile.apply_to(&mut settings);
+        }
         let archive = settings.use_archive.then(|| self.core.archive_path.clone());
 
         let progress_inner = self.clone();
@@ -298,10 +305,7 @@ impl Inner {
                 // algo ha salido mal y guardarlo dejaría la biblioteca cruzada.
                 // Mejor un error visible que un play que suena a otra cosa.
                 let ruta = path.to_string_lossy().into_owned();
-                let ocupado = self
-                    .core
-                    .db
-                    .others_using_file(&ruta, &job.entry.source_id);
+                let ocupado = self.core.db.others_using_file(&ruta, &job.entry.source_id);
                 if !ocupado.is_empty() {
                     self.finish(
                         &id,
@@ -321,7 +325,9 @@ impl Inner {
                     return;
                 }
 
-                let size = std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
+                let size = std::fs::metadata(&path)
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(0);
                 let ext = path
                     .extension()
                     .and_then(|e| e.to_str())

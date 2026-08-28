@@ -71,6 +71,8 @@ export interface Entry {
   existingVideo: string | null;
   existingAudio: string | null;
   unavailable: boolean;
+  liveStatus: "is_live" | "is_upcoming" | "was_live" | "post_live" | "not_live" | null;
+  releaseTimestamp: number | null;
 }
 
 export interface PlaylistInfo {
@@ -115,6 +117,7 @@ export interface Job {
   overwrite: boolean;
   playlistId: string | null;
   playlistTitle: string | null;
+  profile: SourceProfile | null;
   status: JobStatus;
   phase: JobPhase;
   progress: number;
@@ -167,6 +170,52 @@ export interface Playlist {
   thumbnail: string | null;
   createdAt: number;
   itemCount: number;
+}
+
+/** Valores propios de una Fuente; `null` significa heredar Ajustes. */
+export interface SourceProfile {
+  destDir: string | null;
+  videoQuality: string | null;
+  videoContainer: string | null;
+  audioFormat: string | null;
+  audioBitrate: string | null;
+  sponsorblock: boolean | null;
+  writeSubtitles: boolean | null;
+  embedSubtitles: boolean | null;
+  subtitleLangs: string | null;
+  youtubeCookiesFile: string | null;
+}
+
+/** Canal, playlist, álbum o colección guardada para comprobar novedades. */
+export interface MediaSource {
+  id: string;
+  url: string;
+  source: Exclude<Source, "local">;
+  sourceId: string;
+  title: string;
+  uploader: string | null;
+  thumbnail: string | null;
+  mediaKind: Kind;
+  createdAt: number;
+  lastCheckedAt: number | null;
+  lastSuccessAt: number | null;
+  lastError: string | null;
+  totalItems: number;
+  newItems: number;
+  profile: SourceProfile;
+  checkIntervalMinutes: number | null;
+  autoDownload: boolean;
+}
+
+export type MediaSourceItemStatus = "new" | "seen" | "downloaded" | "unavailable" | "removed";
+
+export interface MediaSourceItem {
+  remoteId: string;
+  status: MediaSourceItemStatus;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  present: boolean;
+  entry: Entry;
 }
 
 export type DuplicatePolicy = "skip" | "overwrite" | "ask";

@@ -1,4 +1,5 @@
 use crate::analyze::Entry;
+use crate::settings::SourceProfile;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +42,9 @@ pub struct Job {
     /// Internal playlist uuid this job belongs to.
     pub playlist_id: Option<String>,
     pub playlist_title: Option<String>,
+    /// Instantánea del perfil de la Fuente en el momento de encolarla.
+    #[serde(default)]
+    pub profile: Option<SourceProfile>,
 
     pub status: JobStatus,
     pub phase: JobPhase,
@@ -67,6 +71,7 @@ impl Job {
         overwrite: bool,
         playlist_id: Option<String>,
         playlist_title: Option<String>,
+        profile: Option<SourceProfile>,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -77,6 +82,7 @@ impl Job {
             overwrite,
             playlist_id,
             playlist_title,
+            profile,
             status: JobStatus::Queued,
             phase: JobPhase::Waiting,
             progress: -1.0,
